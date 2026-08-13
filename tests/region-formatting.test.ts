@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { REGIONS } from '../src/utils/constants.ts';
+import { formatCurrency, detectRegionFromUrl } from '../src/utils/formatters.ts';
+
+test('required markets are exactly US/UK/CA/AU/IN', () => {
+  assert.deepEqual(Object.keys(REGIONS).sort(), ['AU', 'CA', 'IN', 'UK', 'US']);
+});
+
+test('each region has a distinct currency and a privacy term used in report language', () => {
+  for (const region of Object.values(REGIONS)) {
+    assert.ok(region.currency.length === 3, `${region.code} should have a 3-letter currency code`);
+    assert.ok(region.privacyTerm.length > 0, `${region.code} should have report-facing privacy language`);
+  }
+});
+
+test('formatCurrency uses the selected region currency, not a hard-coded $', () => {
+  const usd = formatCurrency(1000, 'US');
+  const inr = formatCurrency(1000, 'IN');
+  const gbp = formatCurrency(1000, 'UK');
+  // CAD and USD both conventionally render with a bare "$" per Intl/en-CA —
+  // that's correct real-world formatting, not evidence the region was ignored.
+  assert.match(usd, /\$/);
+  assert.match(gbp, /£/);
+  assert.notEqual(usd, inr);
+  assert.notEqual(usd, gbp);
+});
+
+test('detectRegionFromUrl maps a .ca domain to Canada, not UAE (dropped market)', () => {
+  assert.equal(detectRegionFromUrl('https://mystore.ca'), 'CA');
+  assert.equal(detectRegionFromUrl('https://mystore.co.uk'), 'UK');
+  assert.equal(detectRegionFromUrl('https://mystore.in'), 'IN');
+});

@@ -1,0 +1,85 @@
+# JSONalytics
+
+A Shopify tracking-audit tool. Point it at a storefront URL and it audits the
+real tracking/measurement pipeline — GTM, GA4, Meta Pixel, TikTok Pixel,
+dataLayer, consent signals — and follows the evidence upstream to the
+earliest meaningful failure instead of just listing what's present or absent.
+
+Operating philosophy: **AUDIT → LOCATE → POINT → GUIDE**. Every finding
+states what was observed, what it proves, what it does *not* prove, and what
+to check first. Nothing is inferred beyond what the evidence supports.
+
+## Requirements
+
+- Node.js 20+ (tested on Node 24)
+- `npm install` once, after cloning
+
+## Running it
+
+This app has two halves that both need to be running: the Vite frontend
+(`localhost:5173`) and the local Express/Puppeteer backend (`127.0.0.1:4000`,
+which Vite proxies `/api/*` requests to). You do not need to juggle two
+terminals manually:
+
+```bash
+npm run dev:all
+```
+
+This starts both together and stops both together on Ctrl+C. Open
+`http://localhost:5173`.
+
+If you do need them separately (e.g. debugging the backend on its own):
+
+```bash
+npm run server   # backend only, http://127.0.0.1:4000
+npm run dev      # frontend only, http://localhost:5173 (backend must already be running)
+```
+
+Without the backend running, the frontend's scan/audit actions will fail
+with a clear "could not reach store" / connection error rather than silently
+faking a result.
+
+## Configuration
+
+Copy your own values into a `.env` file in the project root (see the
+placeholder comments already in `.env` for the exact variable names):
+Shopify custom-app access token (or client credentials), and GA4/GTM OAuth
+client credentials + redirect URIs if you want live GA4/GTM API access from
+the "With Access" tab. None of this is required for the read-only "No
+Access" surface/deep scan tabs — those only need a store URL.
+
+`.env` and `tokens.json` (where OAuth tokens get cached after you connect
+GA4/GTM) are both gitignored. Never commit or share either file.
+
+## Scripts
+
+| Command | What it does |
+|---|---|
+| `npm run dev:all` | Frontend + backend together (recommended for local use) |
+| `npm run dev` | Frontend only |
+| `npm run server` | Backend only |
+| `npm run build` | Type-check (`tsc -b`) then production build (`vite build`) |
+| `npm test` | Runs the test suite (`node --test`) |
+| `npm run lint` | Runs oxlint |
+| `npm run preview` | Preview a production build locally |
+
+## Safety model
+
+Normal scans (both the static HTML scan and the headless-browser deep scan)
+are strictly read-only: they never click Add to Cart, submit forms, create
+carts, or navigate checkout, and they never mutate store/customer state. A
+tracking request observed during a page-load scan is evidence that a request
+fired — it is never treated as proof that a business action (like a
+purchase) actually occurred. See `tests/audit-safety.test.cjs` for the tests
+that enforce this.
+
+Because the scanner accepts arbitrary operator-supplied URLs and both
+fetches them and navigates a real browser to them, `lib/ssrfGuard.cjs`
+blocks loopback/private/link-local/reserved targets (including the common
+cloud-metadata address) before every scan. See `tests/ssrf-guard.test.cjs`.
+
+## Markets
+
+The market selector (US / UK / CA / AU / IN) drives report currency
+formatting and privacy-law language (CCPA/CPRA, UK GDPR, PIPEDA, Australian
+Privacy Act, DPDP) — it is not cosmetic. See `src/utils/constants.ts`.
