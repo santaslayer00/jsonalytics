@@ -26,6 +26,14 @@ test('formatCurrency uses the selected region currency, not a hard-coded $', () 
   assert.notEqual(usd, gbp);
 });
 
+test('formatCurrency works for every target market without throwing, including CA and AU which were previously unasserted', () => {
+  for (const region of ['US', 'UK', 'CA', 'AU', 'IN'] as const) {
+    const formatted = formatCurrency(1234.5, region);
+    assert.ok(formatted.length > 0, `${region} produced an empty/invalid currency string`);
+    assert.doesNotMatch(formatted, /NaN|undefined/, `${region} formatted currency incorrectly: ${formatted}`);
+  }
+});
+
 test('detectRegionFromUrl maps a .ca domain to Canada, not UAE (dropped market)', () => {
   assert.equal(detectRegionFromUrl('https://mystore.ca'), 'CA');
   assert.equal(detectRegionFromUrl('https://mystore.co.uk'), 'UK');

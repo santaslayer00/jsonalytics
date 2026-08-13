@@ -73,6 +73,38 @@ test('the same small RTO leak has no such guarantee in a non-COD-typical market'
   assert.equal(result.issues.some((i) => i.title === 'RTO returns'), false);
 });
 
+test('the top-10 cap and honest totalFound hold in EVERY target market, not just the ones spot-checked elsewhere (US/IN)', () => {
+  const manyFindings = Array.from({ length: 8 }, (_, i) => finding({ id: `f${i}`, severity: 'high' }));
+  const leaks: LeakItem[] = [
+    { name: 'RTO returns', amt: 3000 },
+    { name: 'COD settlement lag (cash locked)', amt: 800 },
+    { name: 'ROAS opportunity gap (vs 3x)', amt: 1200 },
+  ];
+  for (const region of ['US', 'UK', 'CA', 'AU', 'IN'] as const) {
+    const result = buildTopIssues(report(manyFindings), leaks, region);
+    assert.ok(result.issues.length <= 10, `${region}: cap exceeded (${result.issues.length} issues)`);
+    assert.equal(result.totalFound, 11, `${region}: totalFound should count all 8 findings + 3 leaks regardless of market`);
+    // Every issue must carry non-empty guidance — no region should silently
+    // blank out a detail/firstCheck string (the synthetic tracking findings
+    // used here are short by design; the point is catching empty/undefined,
+    // which real diagnosticEngine.ts findings would never produce either).
+    for (const issue of result.issues) {
+      assert.ok(issue.detail && issue.detail.length > 0, `${region}: issue "${issue.title}" has an empty detail`);
+      assert.ok(issue.firstCheck && issue.firstCheck.length > 0, `${region}: issue "${issue.title}" has an empty firstCheck`);
+    }
+  }
+});
+
+test('only India gets the COD-typical guarantee/anomaly framing — UK, CA, and AU are treated identically to US', () => {
+  const leaks: LeakItem[] = [{ name: 'RTO returns', amt: 1000 }];
+  const usDetail = buildTopIssues(report([]), leaks, 'US').issues[0].detail;
+  for (const region of ['UK', 'CA', 'AU'] as const) {
+    const detail = buildTopIssues(report([]), leaks, region).issues[0].detail;
+    assert.equal(detail, usDetail, `${region} should use the same non-COD-typical framing as US`);
+    assert.match(detail, /atypical/i);
+  }
+});
+
 test('zero-amount leaks are not surfaced as issues at all', () => {
   const leaks: LeakItem[] = [{ name: 'RTO returns', amt: 0 }];
   const result = buildTopIssues(report([]), leaks, 'IN');
