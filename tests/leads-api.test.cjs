@@ -38,3 +38,13 @@ test('storeUrl is required to create a lead — no silent empty leads', () => {
   assert.match(postRoute, /storeUrl\.trim\(\)/);
   assert.match(postRoute, /status\(400\)/);
 });
+
+test('a new lead starts with lastScan: null — nothing cached until explicitly scanned', () => {
+  const postRoute = server.slice(server.indexOf("app.post('/api/leads'"), server.indexOf("app.patch('/api/leads/:id'"));
+  assert.match(postRoute, /lastScan:\s*null/);
+});
+
+test('PATCH accepts a lastScan cache blob so re-visiting a lead does not force a re-scan', () => {
+  const patchRoute = server.slice(server.indexOf("app.patch('/api/leads/:id'"), server.indexOf("app.delete('/api/leads/:id'"));
+  assert.match(patchRoute, /lastScan/);
+});

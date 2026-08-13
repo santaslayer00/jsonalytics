@@ -9,6 +9,14 @@ export const LEAD_STATUS_LABELS: Record<LeadStatus, string> = {
   in_progress: 'In progress',
 };
 
+import type { SurfaceAuditResult, DeepScanResult } from './auditLogic';
+
+export interface LeadScanCache {
+  scannedAt: string; // ISO timestamp
+  surfaceResult: SurfaceAuditResult;
+  deepScan: DeepScanResult | null;
+}
+
 export interface Lead {
   id: string;
   storeUrl: string;
@@ -17,6 +25,8 @@ export interface Lead {
   notes: string;
   createdAt: string;
   updatedAt: string;
+  /** Cached evidence from the last scan run from the Leads tab. Null/absent until "Scan"/"Re-scan" is clicked — never written silently. */
+  lastScan?: LeadScanCache | null;
 }
 
 const PROXY_BASE = '/api';
@@ -43,7 +53,7 @@ export async function createLead(storeUrl: string, status: LeadStatus = 'in_queu
   return body.lead;
 }
 
-export async function updateLead(id: string, patch: Partial<Pick<Lead, 'status' | 'notes' | 'storeName'>>): Promise<Lead> {
+export async function updateLead(id: string, patch: Partial<Pick<Lead, 'status' | 'notes' | 'storeName' | 'lastScan'>>): Promise<Lead> {
   const res = await fetch(`${PROXY_BASE}/leads/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

@@ -522,6 +522,10 @@ app.post('/api/leads', (req, res) => {
     notes: typeof notes === 'string' ? notes : '',
     createdAt: now,
     updatedAt: now,
+    // Cached evidence from the last scan run from the Leads tab, so
+    // revisiting a lead doesn't force a re-scan — null until "Scan"/
+    // "Re-scan" is explicitly clicked. Never written automatically.
+    lastScan: null,
   };
   leads.push(lead);
   saveLeads(leads);
@@ -532,7 +536,7 @@ app.patch('/api/leads/:id', (req, res) => {
   const lead = leads.find((l) => l.id === req.params.id);
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-  const { status, notes, storeName } = req.body || {};
+  const { status, notes, storeName, lastScan } = req.body || {};
   if (status !== undefined) {
     if (!LEAD_STATUSES.includes(status)) {
       return res.status(400).json({ error: `Invalid status. Must be one of: ${LEAD_STATUSES.join(', ')}` });
@@ -541,6 +545,10 @@ app.patch('/api/leads/:id', (req, res) => {
   }
   if (notes !== undefined) lead.notes = typeof notes === 'string' ? notes : lead.notes;
   if (storeName !== undefined) lead.storeName = typeof storeName === 'string' ? storeName : lead.storeName;
+  // lastScan is a cache blob written by the trusted local frontend (already
+  // evidence gathered through the SSRF-guarded scan endpoints) — stored
+  // as-is rather than deep-validated field by field.
+  if (lastScan !== undefined) lead.lastScan = lastScan;
   lead.updatedAt = new Date().toISOString();
 
   saveLeads(leads);

@@ -8,6 +8,10 @@ import {
   LEAD_STATUS_LABELS,
 } from '../../utils/leadsApi';
 import type { Lead, LeadStatus } from '../../utils/leadsApi';
+import { runSurfaceAudit } from '../../utils/auditLogic';
+import { runDiagnostics } from '../../utils/diagnosticEngine';
+import { formatRelativeTime } from '../../utils/formatters';
+import type { Region } from '../../utils/constants';
 
 const statusColor: Record<LeadStatus, string> = {
   interested: '#4ade80',
@@ -19,9 +23,10 @@ const statusColor: Record<LeadStatus, string> = {
 interface LeadRegisterProps {
   /** Prefills the add-lead URL field, e.g. from whatever was just scanned in another tab. */
   prefillUrl?: string;
+  region: Region;
 }
 
-export const LeadRegister: React.FC<LeadRegisterProps> = ({ prefillUrl }) => {
+export const LeadRegister: React.FC<LeadRegisterProps> = ({ prefillUrl, region }) => {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +34,7 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ prefillUrl }) => {
   const [newStatus, setNewStatus] = useState<LeadStatus>('in_queue');
   const [isAdding, setIsAdding] = useState(false);
   const [filter, setFilter] = useState<LeadStatus | 'all'>('all');
+  const [scanningId, setScanningId] = useState<string | null>(null);
 
   const load = async () => {
     setIsLoading(true);
@@ -91,6 +97,28 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ prefillUrl }) => {
     }
   };
 
+  // Explicit action only — cached findings are never written silently.
+  // Deliberately a static surface scan only (not deep scan) to keep this
+  // "lean" and fast; deep scan remains an explicit Tab 1/Tab 2 action.
+  const handleScan = async (lead: Lead) => {
+    setScanningId(lead.id);
+    setError(null);
+    try {
+      const surfaceResult = await runSurfaceAudit(lead.storeUrl, region);
+      if (surfaceResult.status === 'error') {
+        throw new Error(surfaceResult.error || 'Scan failed.');
+      }
+      const updated = await updateLead(lead.id, {
+        lastScan: { scannedAt: new Date().toISOString(), surfaceResult, deepScan: null },
+      });
+      setLeads((prev) => prev.map((l) => (l.id === lead.id ? updated : l)));
+    } catch (err: any) {
+      setError(err.message || `Could not scan ${lead.storeUrl}.`);
+    } finally {
+      setScanningId(null);
+    }
+  };
+
   const visibleLeads = filter === 'all' ? leads : leads.filter((l) => l.status === filter);
 
   return (
@@ -98,7 +126,7 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ prefillUrl }) => {
       <div style={{ marginBottom: '1rem' }}>
         <h2 style={{ fontSize: '1.05rem', margin: '0 0 4px 0' }}>Lead Register</h2>
         <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-          A lean pipeline tracker — who you've scanned, who's worth following up with. Not scan evidence, just operator intent.
+          A lean pipeline tracker — who's worth following up with. Scanning a lead here caches the finding so revisiting it doesn't re-scan automatically; click Re-scan when you want fresh evidence.
         </div>
       </div>
 
@@ -196,6 +224,32 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ prefillUrl }) => {
                 onBlur={(e) => handleNotesBlur(lead.id, e.target.value)}
                 style={{ width: '100%', marginTop: '8px', padding: '7px 10px', backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '6px', color: '#e2e8f0', fontSize: '0.8rem', outline: 'none' }}
               />
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginTop: '8px', paddingTop: '8px', borderTop: '1px dashed #334155', flexWrap: 'wrap' }}>
+                {lead.lastScan ? (
+                  (() => {
+                    const diagnostic = runDiagnostics(lead.lastScan.surfaceResult, lead.lastScan.deepScan ?? null);
+                    return (
+                      <div style={{ fontSize: '0.76rem', color: '#cbd5e1' }}>
+                        <span style={{ color: '#64748b' }}>Cached — scanned {formatRelativeTime(lead.lastScan.scannedAt)}: </span>
+                        {diagnostic.earliestFailure ? (
+                          <span>📍 {diagnostic.earliestFailure.title}</span>
+                        ) : (
+                          <span style={{ color: '#4ade80' }}>✔ No blocking issue found</span>
+                        )}
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div style={{ fontSize: '0.76rem', color: '#64748b' }}>Not scanned yet — nothing cached, no network call made until you ask.</div>
+                )}
+                <button
+                  onClick={() => handleScan(lead)}
+                  disabled={scanningId === lead.id}
+                  style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #475569', borderRadius: '6px', padding: '5px 10px', fontSize: '0.74rem', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                >
+                  {scanningId === lead.id ? 'Scanning...' : lead.lastScan ? '🔄 Re-scan' : '🔍 Scan now'}
+                </button>
+              </div>
             </div>
           ))}
         </div>

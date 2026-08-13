@@ -870,7 +870,7 @@ export default function App() {
 
               {/* ================= TAB 4: LEADS ================= */}
               {activeTab === 'leads' && !isMinimized && (
-                <LeadRegister prefillUrl={surfaceUrl || storeUrl} />
+                <LeadRegister prefillUrl={surfaceUrl || storeUrl} region={region} />
               )}
             </div>
           </>
