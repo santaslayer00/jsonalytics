@@ -10,7 +10,7 @@ import {
   exportReportPdf,
 } from './utils/auditLogic';
 import type { AuditInputs, DeepScanResult, SurfaceAuditResult } from './utils/auditLogic';
-import { resolveEffectiveSignals, buildSurfaceCards } from './utils/auditLogic';
+import { resolveEffectiveSignals, buildSurfaceCards, reconcileLiveApiEvidence } from './utils/auditLogic';
 import { runDiagnostics } from './utils/diagnosticEngine';
 import type { DiagnosticSeverity } from './utils/diagnosticEngine';
 import { CSVUploader } from './components/stage2/CSVUploader';
@@ -71,6 +71,7 @@ export default function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [scanResult, setScanResult] = useState<any>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [csvRtoSuggestion, setCsvRtoSuggestion] = useState<number | null>(null);
   const [csvInputs, setCsvInputs] = useState<AuditInputs | null>(null);
   const [financialInputs, setFinancialInputs] = useState({ cogs: '', shipping: '', adSpend: '', settlementDays: '', newCustomers: '', rtoOrders: '' });
   const [isPullingShopify, setIsPullingShopify] = useState(false);
@@ -155,6 +156,13 @@ export default function App() {
     return buildSurfaceCards(effective, surfaceResult.hasCmp, surfaceResult.cmpName, region);
   }, [surfaceResult, deepScan, region]);
 
+  // "GA4 connected" != "GA4 implementation is correct" — reconcile what the
+  // live API actually reports against what was observed on the storefront.
+  const apiReconciliation = useMemo(() => {
+    if (!scanResult || scanResult.status === 'error') return [];
+    return reconcileLiveApiEvidence(scanResult, liveGa4, liveGtmMatch, deepScan);
+  }, [scanResult, liveGa4, liveGtmMatch, deepScan]);
+
   // ===== Tab 2 handlers =====
 
   const handlePullLiveOrders = async () => {
@@ -177,7 +185,17 @@ export default function App() {
     rtoOrders: number;
     newCustomers: number;
     avgOrderValue: number;
+    suggestedRtoOrders?: number;
   }) => {
+    // Suggestion only, from "restocked" fulfillment-status rows — pre-fills
+    // the confirm-before-scan RTO field as a starting point, still fully
+    // editable. csvInputs.rtoOrders itself stays honestly 0 either way.
+    if (payload.suggestedRtoOrders) {
+      setCsvRtoSuggestion(payload.suggestedRtoOrders);
+      setFinancialInputs((current) => (current.rtoOrders === '' ? { ...current, rtoOrders: String(payload.suggestedRtoOrders) } : current));
+    } else {
+      setCsvRtoSuggestion(null);
+    }
     const derivedInputs: AuditInputs = {
       grossRevenue: payload.grossRevenue,
       totalOrders: payload.totalOrders,
@@ -569,7 +587,7 @@ export default function App() {
                   {csvInputs && (
                     <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '12px', border: '1px solid #334155', marginBottom: '1rem' }}>
                       <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>Confirmed financial inputs</div>
-                      <div style={{ color: '#94a3b8', fontSize: '0.75rem', margin: '4px 0 10px' }}>Required before calculating financial metrics. No values are prefilled or estimated.</div>
+                      <div style={{ color: '#94a3b8', fontSize: '0.75rem', margin: '4px 0 10px' }}>Required before calculating financial metrics. Values are never estimated — the one exception is RTO, which may be pre-filled from a CSV suggestion below, and still requires your confirmation.</div>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: '10px' }}>
                         {([
                           ['cogs', 'COGS ($)'], ['shipping', 'Shipping cost ($)'], ['adSpend', 'Ad spend ($)'], ['settlementDays', 'Settlement days'], ['newCustomers', 'New customers (if missing)'], ['rtoOrders', 'RTO orders (if missing, 0 if none)'],
@@ -577,6 +595,11 @@ export default function App() {
                           <input key={field} type="number" min="0" placeholder={label} value={financialInputs[field]} onChange={(e) => setFinancialInputs((current) => ({ ...current, [field]: e.target.value }))} style={{ padding: '10px 12px', backgroundColor: '#0f172a', border: '1px solid #475569', borderRadius: '8px', color: '#fff', fontSize: '0.85rem' }} />
                         ))}
                       </div>
+                      {csvRtoSuggestion !== null && (
+                        <div style={{ color: '#fbbf24', fontSize: '0.72rem', marginTop: '8px' }}>
+                          Suggested from CSV: {csvRtoSuggestion} order{csvRtoSuggestion === 1 ? '' : 's'} with fulfillment status "restocked" — pre-filled above as a starting point, not a confirmed count. "Restocked" is Shopify's own signal for inventory returned to origin, but confirm before scanning.
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -663,16 +686,21 @@ export default function App() {
                       {/* Live API Confirmation */}
                       {(liveGa4 || liveGtmMatch || liveDataError) && (
                         <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '12px', border: '1px solid #334155' }}>
-                          <div style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '10px' }}>Live API Confirmation</div>
+                          <div style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '4px' }}>Live API Confirmation</div>
+                          <div style={{ color: '#94a3b8', fontSize: '0.72rem', marginBottom: '10px' }}>"Connected" is not the same claim as "correctly implemented" — reconciled against storefront evidence below.</div>
                           {liveDataError && <div style={{ color: '#fca5a5', fontSize: '0.8rem', marginBottom: '8px' }}>⚠ {liveDataError}</div>}
                           {liveGa4 && (
                             <div style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
                               GA4 (last 30d): {liveGa4.sessions} sessions, {liveGa4.totalUsers} users, {liveGa4.conversions} conversions, ${liveGa4.purchaseRevenue.toLocaleString()} revenue
                             </div>
                           )}
-                          {liveGtmMatch && (
-                            <div style={{ fontSize: '0.8rem', color: liveGtmMatch.matched ? '#4ade80' : '#fbbf24', marginTop: '6px' }}>
-                              {liveGtmMatch.matched ? `✓ GTM container confirmed live: ${liveGtmMatch.containerName}` : '⚠ GTM ID not found in your connected GTM account containers'}
+                          {apiReconciliation.length > 0 && (
+                            <div style={{ display: 'grid', gap: '6px', marginTop: '10px' }}>
+                              {apiReconciliation.map((f, i) => (
+                                <div key={i} style={{ fontSize: '0.78rem', color: f.tone === 'good' ? '#4ade80' : f.tone === 'bad' ? '#fca5a5' : '#fbbf24', lineHeight: 1.4 }}>
+                                  {f.tone === 'good' ? '✓ ' : '⚠ '}{f.text}
+                                </div>
+                              ))}
                             </div>
                           )}
                         </div>

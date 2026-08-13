@@ -569,13 +569,17 @@ export const runFullAudit = async (
     leak.priority = i < 2 && leak.amt > 0;
   });
 
-  let volumeNote: string | undefined;
-  if (inputs.totalOrders >= 500) {
-    const topLeak = rankedLeaks[0];
-    volumeNote = topLeak
+  // "Start here" pointer — LOCATE -> POINT. Previously this only appeared
+  // for stores with 500+ orders, so smaller stores (the more typical SMB
+  // case) never got a priority pointer even though rankedLeaks was already
+  // computed for them. Now always surfaces the single biggest confirmed $
+  // leak regardless of volume; the framing just adjusts for high volume.
+  const topLeak = rankedLeaks[0];
+  const volumeNote = topLeak && topLeak.amt > 0
+    ? inputs.totalOrders >= 500
       ? `High order volume (${inputs.totalOrders} orders) — don't audit product-by-product. Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}), the single largest leak, before anything else.`
-      : `High order volume (${inputs.totalOrders} orders) — no major leaks flagged; focus review on tracking coverage instead.`;
-  }
+      : `Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}) — the single largest confirmed $ leak in this audit.`
+    : 'No major $ leaks flagged from the confirmed inputs — focus review on tracking coverage and the guided checks below.';
 
   // Detailed text findings — replaces the old boxed metric-card grid.
   // Rendered as a plain list in App.tsx, not individual cards.
@@ -838,6 +842,56 @@ export async function fetchGtmContainerMatch(gtmId: string | null): Promise<{ ma
   const containers = data.containers || [];
   const match = containers.find((c: any) => (c.publicId || '').toUpperCase() === gtmId.toUpperCase());
   return match ? { matched: true, containerName: match.name } : { matched: false };
+}
+
+// ---- Live GA4/GTM API reconciliation (Tab 2) ----
+// "GA4 API connected" is not the same claim as "storefront GA4 implementation
+// is correct." This compares what the connected GA4/GTM accounts actually
+// report against what was observed on the storefront, and only states a
+// discrepancy where the evidence genuinely supports one — a dev/test store
+// with low real traffic is expected to show near-zero GA4 numbers, so that
+// case is explicitly hedged rather than flagged as broken.
+export interface ApiReconciliationFinding {
+  tone: 'good' | 'warn' | 'bad';
+  text: string;
+}
+
+export function reconcileLiveApiEvidence(
+  result: Pick<AuditDashboardResult, 'metrics'>,
+  liveGa4: Ga4LiveMetrics | null,
+  gtmMatch: { matched: boolean; containerName?: string } | null,
+  deep: DeepScanResult | null
+): ApiReconciliationFinding[] {
+  const findings: ApiReconciliationFinding[] = [];
+
+  if (gtmMatch) {
+    findings.push(
+      gtmMatch.matched
+        ? { tone: 'good', text: `GTM container confirmed live in your connected account: ${gtmMatch.containerName}.` }
+        : { tone: 'warn', text: 'The audited GTM ID was not found among the containers in your connected GTM account — you may be connected to the wrong account, or this container belongs to someone else.' }
+    );
+  }
+
+  if (liveGa4) {
+    const hasEcommerceEvidence = !!deep && deep.eventEvidence.some((e) => e.ecommerceFields.length > 0);
+    if (liveGa4.conversions > 0 || liveGa4.purchaseRevenue > 0) {
+      if (deep && !hasEcommerceEvidence) {
+        findings.push({
+          tone: 'warn',
+          text: `GA4 reports ${liveGa4.conversions} conversions / $${liveGa4.purchaseRevenue.toLocaleString()} revenue for this window, but the storefront deep scan found no ecommerce dataLayer fields on page load. This isn't a contradiction by itself (conversions happen at checkout, not the homepage) — but if GA4 revenue doesn't reconcile with Shopify order totals for the same window, check how GA4 is receiving purchase data.`,
+        });
+      } else {
+        findings.push({ tone: 'good', text: `GA4 reports real conversions (${liveGa4.conversions}) and revenue ($${liveGa4.purchaseRevenue.toLocaleString()}) for this window — cross-check the revenue figure against Shopify order totals for the same date range before trusting it as final.` });
+      }
+    } else if (result.metrics.ga4Active && liveGa4.sessions === 0) {
+      findings.push({
+        tone: 'warn',
+        text: 'GA4 shows 0 sessions in this window despite a GA4 tag being detected on the storefront. For a genuinely low-traffic dev/test store this can be entirely accurate — confirm against a known test visit before concluding tracking is broken.',
+      });
+    }
+  }
+
+  return findings;
 }
 
 export interface DeepScanResult {
