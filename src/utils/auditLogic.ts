@@ -15,6 +15,9 @@
 import { REGIONS } from './constants.ts';
 import type { Region } from './constants.ts';
 import { formatCurrency } from './formatters.ts';
+import { runDiagnostics } from './diagnosticEngine.ts';
+import { buildTopIssues, COD_TYPICAL_MARKETS } from './topIssues.ts';
+import type { TopIssuesResult } from './topIssues.ts';
 
 export interface AuditInputs {
   grossRevenue: number;
@@ -108,7 +111,10 @@ export interface AuditDashboardResult {
     businessMetrics: Array<{
       label: string;
       value: string;
+      /** One simple sentence — read this off on a call without getting stuck explaining the metric first. */
+      explainer: string;
     }>;
+    topIssues: TopIssuesResult;
     volumeNote?: string;
   };
 }
@@ -581,6 +587,36 @@ export const runFullAudit = async (
       : `Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}) — the single largest confirmed $ leak in this audit.`
     : 'No major $ leaks flagged from the confirmed inputs — focus review on tracking coverage and the guided checks below.';
 
+  const isCodTypicalMarket = COD_TYPICAL_MARKETS.includes(region);
+
+  // Unified "Top Issues": merges tracking-evidence findings (identical logic
+  // in every market) with financial leaks (ranked by this store's own
+  // measured $ amounts, with one real region-conditioned rule for COD/RTO —
+  // see topIssues.ts). Runs the diagnostic engine here too, from whatever
+  // evidence this Tab-2 audit has (deep scan is optional and, if the
+  // operator already ran it before clicking "Audit Store", gets used).
+  const diagnosticReport = runDiagnostics(
+    {
+      url: storeUrl,
+      status: 'ok',
+      gtmId: scan.gtmId,
+      gtmIdsAll: scan.gtmIdsAll,
+      ga4Id: scan.ga4Id,
+      hasMetaPixel: scan.hasMetaPixel,
+      metaPixelId: scan.metaPixelId,
+      hasTiktokPixel: scan.hasTiktokPixel,
+      tiktokPixelId: scan.tiktokPixelId,
+      hasCmp: scan.hasCmp,
+      cmpName: scan.cmpName,
+      sslValid: storeUrl.trim().toLowerCase().startsWith('https://'),
+      missingSignalCount: effective.missingSignalCount,
+      blindSpotPct: effective.blindSpotPct,
+      cards: [],
+    },
+    deepEvidence
+  );
+  const topIssuesResult = buildTopIssues(diagnosticReport, audit.leaks, region);
+
   // Detailed text findings — replaces the old boxed metric-card grid.
   // Rendered as a plain list in App.tsx, not individual cards.
   const signalFindings: SignalFinding[] = [
@@ -654,15 +690,28 @@ export const runFullAudit = async (
       signalFindings,
       issueList,
       businessMetrics: [
-        { label: 'Gross Revenue', value: formatCurrency(audit.grossRevenue, region) },
-        { label: 'ROAS', value: `${audit.roas.toFixed(2)}x` },
-        { label: 'CAC', value: formatCurrency(audit.cac, region) },
-        { label: 'Gross Margin', value: formatCurrency(audit.grossMargin, region) },
-        { label: 'RTO Rate', value: `${audit.rtoPct.toFixed(2)}% (${formatCurrency(audit.rtoLoss, region)})` },
-        { label: 'COD Share', value: `${audit.codPct.toFixed(2)}% (share only; failure cost not confirmed)` },
-        { label: 'Settlement Lag (cash locked)', value: formatCurrency(audit.settlementLag, region) },
-        { label: 'Cash Flow Health', value: `${audit.netOutcome >= 0 ? 'Healthy' : 'At Risk'}` },
+        { label: 'Gross Revenue', value: formatCurrency(audit.grossRevenue, region), explainer: 'Total order value before any costs are subtracted — your top-line number.' },
+        { label: 'ROAS', value: `${audit.roas.toFixed(2)}x`, explainer: 'For every $1 spent on ads, how many $ came back in revenue — below 1x means ads are losing money outright.' },
+        { label: 'CAC', value: formatCurrency(audit.cac, region), explainer: 'What it costs in ad spend alone to acquire one new customer.' },
+        { label: 'Gross Margin', value: formatCurrency(audit.grossMargin, region), explainer: "What's left after product cost and shipping — before ad spend and other overhead." },
+        {
+          label: 'RTO Rate',
+          value: `${audit.rtoPct.toFixed(2)}% (${formatCurrency(audit.rtoLoss, region)})`,
+          explainer: isCodTypicalMarket
+            ? 'Share of orders that came back undelivered — a first-order cost driver in COD-heavy markets like this one.'
+            : 'Share of orders that came back undelivered — normally near-zero outside COD-heavy markets, so any non-zero figure is worth a second look.',
+        },
+        {
+          label: 'COD Share',
+          value: `${audit.codPct.toFixed(2)}% (share only; failure cost not confirmed)`,
+          explainer: isCodTypicalMarket
+            ? 'Share of orders paid cash-on-delivery — higher share usually tracks with higher RTO exposure.'
+            : 'Share of orders paid cash-on-delivery — uncommon in this market, so a non-zero figure is worth confirming is intentional.',
+        },
+        { label: 'Settlement Lag (cash locked)', value: formatCurrency(audit.settlementLag, region), explainer: "Cash tied up waiting for COD payments to actually settle — money you've technically earned but can't spend yet." },
+        { label: 'Cash Flow Health', value: `${audit.netOutcome >= 0 ? 'Healthy' : 'At Risk'}`, explainer: "Whether gross margin actually covers ad spend — 'At Risk' means you're spending more on ads than you're making before overhead." },
       ],
+      topIssues: topIssuesResult,
       volumeNote,
     },
   };
@@ -703,6 +752,7 @@ function buildFailedResult(storeUrl: string, errorMessage: string): AuditDashboa
       signalFindings: [],
       issueList: [],
       businessMetrics: [],
+      topIssues: { issues: [], totalFound: 0 },
     },
   };
 }

@@ -16,6 +16,7 @@ const app = express();
 // before every fetch() and puppeteer.goto() call. See lib/ssrfGuard.cjs for
 // the implementation and its direct unit tests.
 const { assertScannableUrl, safeFetch } = require('./lib/ssrfGuard.cjs');
+const { fetchWithRateLimitRetry } = require('./lib/shopifyFetch.cjs');
 const LOCAL_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
 app.use(cors({
   origin(origin, callback) {
@@ -341,21 +342,33 @@ app.get('/api/shopify/orders', async (req, res) => {
     if (endDate) params.set('created_at_max', `${endDate}T23:59:59Z`);
     let nextUrl = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2026-01/orders.json?${params}`;
     const orders = [];
+    let pageCount = 0;
     while (nextUrl) {
-      const ordersRes = await fetch(nextUrl, {
+      // Rate-limit-aware: a large store needs many pages to pull a full
+      // date range, and Shopify's Admin API rate-limits by a leaky bucket —
+      // without retrying on 429 this would just fail partway through for
+      // exactly the stores where "store size shouldn't matter" matters most.
+      const ordersRes = await fetchWithRateLimitRetry(nextUrl, {
         headers: {
           'X-Shopify-Access-Token': token,
           'Content-Type': 'application/json',
         },
       });
-      if (!ordersRes.ok) return res.status(ordersRes.status).json({ error: `Shopify orders request failed (${ordersRes.status})` });
+      if (!ordersRes.ok) {
+        return res.status(ordersRes.status).json({
+          error: ordersRes.status === 429
+            ? `Shopify rate-limited this pull after ${pageCount} page(s) and retries were exhausted — try a narrower date range.`
+            : `Shopify orders request failed (${ordersRes.status})`,
+        });
+      }
       const data = await ordersRes.json();
       orders.push(...(data.orders || []));
+      pageCount++;
       const link = ordersRes.headers.get('link') || '';
       const next = link.split(',').find((part) => /rel="next"/.test(part));
       nextUrl = next ? next.match(/<([^>]+)>/)?.[1] || null : null;
     }
-    res.json({ orders, range: { startDate: startDate || null, endDate: endDate || null }, paginated: true });
+    res.json({ orders, range: { startDate: startDate || null, endDate: endDate || null }, paginated: true, pageCount });
   } catch (err) {
     res.status(502).json({ error: 'Could not fetch Shopify orders', detail: err.message });
   }

@@ -18,6 +18,7 @@ import { LeadRegister } from './components/leads/LeadRegister';
 import { getAdapterStateLabel } from './utils/sourceAdapters';
 import { REGIONS } from './utils/constants';
 import type { Region } from './utils/constants';
+import { formatCurrency } from './utils/formatters';
 
 const severityColor: Record<DiagnosticSeverity, string> = {
   critical: '#fca5a5',
@@ -568,6 +569,9 @@ export default function App() {
                     )}
                   </div>
 
+                  <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '10px' }}>
+                    Store size doesn't change how this works: the audit reads aggregate totals and a single representative scan, never a per-order or per-product review — a 50-order store and a 50,000-order store go through the exact same steps. Large live pulls automatically retry through Shopify's rate limits instead of failing partway through.
+                  </div>
                   <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                     <CSVUploader onDataParsed={handleCSVVitals} />
                     <button
@@ -742,29 +746,47 @@ export default function App() {
 
                         <div style={{ marginBottom: '1rem', color: '#cbd5e1' }}>{scanResult.report.summary}</div>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: '12px' }}>
-                          <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
-                            <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '6px' }}>Top Business Metrics</div>
-                            <div style={{ display: 'grid', gap: '8px' }}>
-                              {scanResult.report.businessMetrics.map((metric: { label: string; value: string }, i: number) => (
-                                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                        <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px', marginBottom: '12px' }}>
+                          <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '8px' }}>Top 8 Business Metrics — call-ready</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px' }}>
+                            {scanResult.report.businessMetrics.map((metric: { label: string; value: string; explainer: string }, i: number) => (
+                              <div key={i} style={{ backgroundColor: '#1e293b', borderRadius: '6px', padding: '8px 10px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
                                   <span style={{ color: '#94a3b8' }}>{metric.label}</span>
                                   <span style={{ color: '#e2e8f0', fontWeight: 700 }}>{metric.value}</span>
                                 </div>
-                              ))}
+                                <div style={{ marginTop: '4px', color: '#64748b', fontSize: '0.7rem', lineHeight: 1.35 }}>{metric.explainer}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' }}>
+                            <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Top Issues</div>
+                            <div style={{ fontSize: '0.68rem', color: '#64748b' }}>
+                              {scanResult.report.topIssues.totalFound > 10
+                                ? `Showing top 10 of ${scanResult.report.topIssues.totalFound} found`
+                                : `${scanResult.report.topIssues.totalFound} found`}
                             </div>
                           </div>
-
-                          <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
-                            <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '6px' }}>Findings</div>
+                          {scanResult.report.topIssues.issues.length === 0 ? (
+                            <div style={{ fontSize: '0.78rem', color: '#4ade80' }}>✔ No confirmed issues from the evidence gathered — proceed to the guided checks above to validate what a scan can't see.</div>
+                          ) : (
                             <div style={{ display: 'grid', gap: '8px' }}>
-                              {scanResult.report.issueList.map((issue: { category: string; statement: string }, i: number) => (
-                                <div key={i} style={{ fontSize: '0.76rem', borderBottom: '1px solid #334155', paddingBottom: '6px' }}>
-                                  <span style={{ color: '#fbbf24', fontWeight: 700 }}>{issue.category}</span> — {issue.statement}
+                              {scanResult.report.topIssues.issues.map((issue: { id: string; severity: DiagnosticSeverity; category: string; title: string; detail: string; firstCheck: string; amount?: number }, i: number) => (
+                                <div key={issue.id} style={{ fontSize: '0.76rem', borderLeft: `3px solid ${severityColor[issue.severity]}`, paddingLeft: '8px', paddingBottom: '6px', borderBottom: i < scanResult.report.topIssues.issues.length - 1 ? '1px solid #334155' : 'none' }}>
+                                  <div>
+                                    <span style={{ color: severityColor[issue.severity], fontWeight: 700 }}>#{i + 1} {severityLabel[issue.severity]}</span>
+                                    {' — '}<strong>{issue.title}</strong>
+                                    {issue.amount ? <span style={{ color: '#94a3b8' }}> ({formatCurrency(issue.amount, region)})</span> : null}
+                                  </div>
+                                  <div style={{ color: '#cbd5e1', marginTop: '3px' }}>{issue.detail}</div>
+                                  <div style={{ color: '#38bdf8', marginTop: '3px' }}>First check: {issue.firstCheck}</div>
                                 </div>
                               ))}
                             </div>
-                          </div>
+                          )}
                         </div>
                       </div>
 
@@ -814,14 +836,28 @@ export default function App() {
                     <p style={{ lineHeight: 1.55, color: '#334155' }}>{scanResult.report.summary}</p>
                     <h3 style={{ marginTop: '22px' }}>Confirmed business metrics</h3>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
-                      {scanResult.report.businessMetrics.map((metric: { label: string; value: string }, i: number) => (
-                        <div key={i} style={{ border: '1px solid #cbd5e1', borderRadius: '8px', padding: '12px' }}><div style={{ color: '#64748b', fontSize: '0.75rem' }}>{metric.label}</div><div style={{ fontWeight: 700, marginTop: '4px' }}>{metric.value}</div></div>
+                      {scanResult.report.businessMetrics.map((metric: { label: string; value: string; explainer: string }, i: number) => (
+                        <div key={i} style={{ border: '1px solid #cbd5e1', borderRadius: '8px', padding: '12px' }}>
+                          <div style={{ color: '#64748b', fontSize: '0.75rem' }}>{metric.label}</div>
+                          <div style={{ fontWeight: 700, marginTop: '4px' }}>{metric.value}</div>
+                          <div style={{ color: '#64748b', fontSize: '0.7rem', marginTop: '4px', lineHeight: 1.35 }}>{metric.explainer}</div>
+                        </div>
                       ))}
                     </div>
-                    <h3 style={{ marginTop: '22px' }}>Priority actions</h3>
-                    <ol style={{ paddingLeft: '20px', color: '#334155', lineHeight: 1.55 }}>
+                    <h3 style={{ marginTop: '22px' }}>Priority actions {scanResult.report.topIssues.totalFound > 10 ? `(top 10 of ${scanResult.report.topIssues.totalFound})` : ''}</h3>
+                    {scanResult.report.topIssues.issues.length === 0 ? (
+                      <p style={{ color: '#334155' }}>No confirmed issues from the evidence gathered for this audit.</p>
+                    ) : (
+                      <ol style={{ paddingLeft: '20px', color: '#334155', lineHeight: 1.55 }}>
+                        {scanResult.report.topIssues.issues.map((issue: { id: string; title: string; detail: string; firstCheck: string }) => (
+                          <li key={issue.id}><strong>{issue.title}:</strong> {issue.detail} <em>First check: {issue.firstCheck}</em></li>
+                        ))}
+                      </ol>
+                    )}
+                    <h3 style={{ marginTop: '22px' }}>Scope disclosures</h3>
+                    <ul style={{ paddingLeft: '20px', color: '#334155', lineHeight: 1.55, fontSize: '0.9rem' }}>
                       {scanResult.report.issueList.map((issue: { category: string; statement: string }, i: number) => <li key={i}><strong>{issue.category}:</strong> {issue.statement}</li>)}
-                    </ol>
+                    </ul>
                     <div style={{ marginTop: '20px', padding: '12px', background: '#fff7ed', borderLeft: '4px solid #e8792c', color: '#7c2d12', fontSize: '0.85rem' }}>
                       Scope note: this report confirms supplied financial inputs and observable page signals ({scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML plus read-only deep-scan network evidence' : 'static HTML only — deep scan not run for this audit'}). Checkout and event implementation items require the stated validation steps.
                     </div>

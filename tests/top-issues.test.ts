@@ -1,0 +1,79 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { buildTopIssues } from '../src/utils/topIssues.ts';
+import type { DiagnosticReport, DiagnosticFinding } from '../src/utils/diagnosticEngine.ts';
+import type { LeakItem } from '../src/utils/auditLogic.ts';
+
+function finding(overrides: Partial<DiagnosticFinding>): DiagnosticFinding {
+  return {
+    id: 'x',
+    severity: 'medium',
+    confidence: 'high',
+    title: 'X',
+    observed: [],
+    proves: 'proves-x',
+    doesNotProve: 'does-not-prove-x',
+    dependency: 'dep',
+    downstreamConsequences: [],
+    firstCheck: 'check-x',
+    requiresDeepScan: false,
+    ...overrides,
+  };
+}
+
+function report(findings: DiagnosticFinding[]): DiagnosticReport {
+  return { findings, earliestFailure: findings[0] || null, evidenceDepth: 'surface-only' };
+}
+
+test('info-level findings (all-clear / hedges) are excluded from the issues count', () => {
+  const r = report([finding({ id: 'ok', severity: 'info' }), finding({ id: 'real', severity: 'high' })]);
+  const result = buildTopIssues(r, [], 'US');
+  assert.equal(result.totalFound, 1);
+  assert.equal(result.issues[0].id, 'real');
+});
+
+test('financial leaks are ranked by their own measured $ amount, biggest first', () => {
+  const leaks: LeakItem[] = [
+    { name: 'ROAS opportunity gap (vs 3x)', amt: 500 },
+    { name: 'RTO returns', amt: 5000 },
+  ];
+  const result = buildTopIssues(report([]), leaks, 'US');
+  assert.equal(result.issues[0].title, 'RTO returns');
+  assert.equal(result.issues[1].title, 'ROAS opportunity gap (vs 3x)');
+});
+
+test('COD/RTO gets different, honest interpretation text by market — not a fabricated benchmark either way', () => {
+  const leaks: LeakItem[] = [{ name: 'RTO returns', amt: 1000 }];
+  const inResult = buildTopIssues(report([]), leaks, 'IN');
+  const usResult = buildTopIssues(report([]), leaks, 'US');
+  assert.match(inResult.issues[0].detail, /first-order signal/i);
+  assert.match(usResult.issues[0].detail, /atypical/i);
+  assert.notEqual(inResult.issues[0].detail, usResult.issues[0].detail);
+});
+
+test('caps at 10 but reports the honest total found, never silently pretending fewer exist', () => {
+  const manyFindings = Array.from({ length: 14 }, (_, i) => finding({ id: `f${i}`, severity: 'medium' }));
+  const result = buildTopIssues(report(manyFindings), [], 'US');
+  assert.equal(result.issues.length, 10);
+  assert.equal(result.totalFound, 14);
+});
+
+test('a real COD/RTO leak in a COD-typical market is guaranteed a top-10 slot even if it would otherwise be crowded out', () => {
+  const manyHighSeverity = Array.from({ length: 10 }, (_, i) => finding({ id: `h${i}`, severity: 'critical' }));
+  const leaks: LeakItem[] = [{ name: 'RTO returns', amt: 50 }]; // small, would rank last
+  const result = buildTopIssues(report(manyHighSeverity), leaks, 'IN');
+  assert.ok(result.issues.some((i) => i.title === 'RTO returns'), 'RTO must not be crowded out in a COD-typical market');
+});
+
+test('the same small RTO leak has no such guarantee in a non-COD-typical market', () => {
+  const manyHighSeverity = Array.from({ length: 10 }, (_, i) => finding({ id: `h${i}`, severity: 'critical' }));
+  const leaks: LeakItem[] = [{ name: 'RTO returns', amt: 50 }];
+  const result = buildTopIssues(report(manyHighSeverity), leaks, 'US');
+  assert.equal(result.issues.some((i) => i.title === 'RTO returns'), false);
+});
+
+test('zero-amount leaks are not surfaced as issues at all', () => {
+  const leaks: LeakItem[] = [{ name: 'RTO returns', amt: 0 }];
+  const result = buildTopIssues(report([]), leaks, 'IN');
+  assert.equal(result.totalFound, 0);
+});
