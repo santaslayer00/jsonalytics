@@ -26,7 +26,7 @@ import type { DiagnosticReport, DiagnosticSeverity } from './diagnosticEngine';
 import type { LeakItem } from './auditLogic';
 import type { Region } from './constants';
 
-export type TopIssueCategory = 'tracking' | 'financial' | 'compliance';
+export type TopIssueCategory = 'tracking' | 'financial' | 'compliance' | 'manual';
 
 export interface TopIssue {
   id: string;
@@ -129,4 +129,43 @@ export function buildTopIssues(
   }
 
   return { issues: capped, totalFound: issues.length };
+}
+
+/**
+ * Folds outcomes from the guided manual checks (GTM Preview, GA4 DebugView,
+ * ad-platform diagnostics, Shopify reconciliation) into the same ranked
+ * list — so doing those checks in the same sitting actually finishes the
+ * audit instead of leaving it as a disconnected side checklist. A failed
+ * manual check is direct human verification, not inference from evidence —
+ * the strongest tier this app has — so it always leads the list, ahead of
+ * every automated finding regardless of the automated severity scale.
+ * Passed/unsure checks are not issues and add nothing here.
+ */
+export interface ManualCheckResult {
+  id: string;
+  title: string;
+  where: string;
+  outcome: 'pass' | 'fail' | 'unsure';
+  note: string;
+}
+
+export function mergeManualFindings(base: TopIssuesResult, manualResults: ManualCheckResult[], cap = 10): TopIssuesResult {
+  const failed = manualResults.filter((m) => m.outcome === 'fail');
+  const manualIssues: TopIssue[] = failed.map((m) => ({
+    id: `manual-${m.id}`,
+    category: 'manual',
+    severity: 'critical',
+    title: `${m.title} — failed manual verification`,
+    detail: m.note
+      ? `Operator-confirmed via ${m.where}: ${m.note}`
+      : `Operator-confirmed failure via ${m.where} — direct human verification, the strongest evidence tier this app has.`,
+    firstCheck: `Fix, then re-verify in ${m.where} before re-auditing.`,
+  }));
+
+  if (manualIssues.length === 0) return base;
+
+  return {
+    issues: [...manualIssues, ...base.issues].slice(0, cap),
+    totalFound: base.totalFound + manualIssues.length,
+  };
 }

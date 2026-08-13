@@ -976,6 +976,13 @@ export function buildReportHtml(scanResult: AuditDashboardResult): string {
     <h1>${escapeHtml(scanResult.report.headline)}</h1>
     <p style="color:#666;font-size:0.85em">Evidence: ${scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML + read-only deep scan' : 'static HTML only'}</p>
     <p>${escapeHtml(scanResult.report.summary)}</p>
+    <h3>Top Issues${scanResult.report.topIssues.totalFound > scanResult.report.topIssues.issues.length ? ` (top ${scanResult.report.topIssues.issues.length} of ${scanResult.report.topIssues.totalFound} found)` : ''}</h3>
+    ${scanResult.report.topIssues.issues.length === 0
+      ? '<p>No confirmed issues from the evidence gathered for this audit.</p>'
+      : `<ol>${scanResult.report.topIssues.issues
+          .map((i) => `<li><b>${escapeHtml(i.title)}</b> (${escapeHtml(i.severity)})${i.amount ? ` — $${Math.round(i.amount).toLocaleString()}` : ''}: ${escapeHtml(i.detail)} <i>First check: ${escapeHtml(i.firstCheck)}</i></li>`)
+          .join('')}</ol>`
+    }
     <h3>Signal Findings</h3>
     <ul>${scanResult.report.signalFindings
       .map((f) => `<li>${escapeHtml(f.label)}: ${escapeHtml(f.value)}${f.note ? ` — ${escapeHtml(f.note)}` : ''}</li>`)

@@ -11,6 +11,8 @@ import {
 } from './utils/auditLogic';
 import type { AuditInputs, DeepScanResult, SurfaceAuditResult } from './utils/auditLogic';
 import { resolveEffectiveSignals, buildSurfaceCards, reconcileLiveApiEvidence } from './utils/auditLogic';
+import { mergeManualFindings } from './utils/topIssues';
+import type { ManualCheckResult } from './utils/topIssues';
 import { runDiagnostics } from './utils/diagnosticEngine';
 import type { DiagnosticSeverity } from './utils/diagnosticEngine';
 import { CSVUploader } from './components/stage2/CSVUploader';
@@ -44,10 +46,10 @@ const toneColor: Record<string, string> = {
 };
 
 const guidedChecks = [
-  { title: 'Validate purchase firing', where: 'GTM Preview / Tag Assistant', lookFor: 'One purchase event with value, currency, transaction_id, and items.', good: 'Exactly one purchase tag fires with the Shopify order ID.', href: 'https://tagassistant.google.com/' },
-  { title: 'Validate GA4 ecommerce', where: 'GA4 DebugView', lookFor: 'purchase and add_to_cart events with ecommerce parameters.', good: 'Events appear once and revenue matches the test order.', href: 'https://support.google.com/analytics/answer/7201382' },
-  { title: 'Validate ad-platform attribution', where: 'Meta Events Manager / platform diagnostics', lookFor: 'Browser and server events, matching event_id, and no duplicate purchase.', good: 'A single deduplicated purchase is received with no critical diagnostics.', href: 'https://www.facebook.com/events_manager2/' },
-  { title: 'Reconcile store revenue', where: 'Shopify Orders export', lookFor: 'The same date range, refunds, COD orders, and fulfillment statuses.', good: 'Shopify order totals provide the confirmed source for the report.', href: 'https://admin.shopify.com/' },
+  { id: 'purchase-firing', title: 'Validate purchase firing', where: 'GTM Preview / Tag Assistant', lookFor: 'One purchase event with value, currency, transaction_id, and items.', good: 'Exactly one purchase tag fires with the Shopify order ID.', href: 'https://tagassistant.google.com/' },
+  { id: 'ga4-ecommerce', title: 'Validate GA4 ecommerce', where: 'GA4 DebugView', lookFor: 'purchase and add_to_cart events with ecommerce parameters.', good: 'Events appear once and revenue matches the test order.', href: 'https://support.google.com/analytics/answer/7201382' },
+  { id: 'ad-platform-attribution', title: 'Validate ad-platform attribution', where: 'Meta Events Manager / platform diagnostics', lookFor: 'Browser and server events, matching event_id, and no duplicate purchase.', good: 'A single deduplicated purchase is received with no critical diagnostics.', href: 'https://www.facebook.com/events_manager2/' },
+  { id: 'revenue-reconciliation', title: 'Reconcile store revenue', where: 'Shopify Orders export', lookFor: 'The same date range, refunds, COD orders, and fulfillment statuses.', good: 'Shopify order totals provide the confirmed source for the report.', href: 'https://admin.shopify.com/' },
 ];
 
 export default function App() {
@@ -74,6 +76,10 @@ export default function App() {
   const [scanResult, setScanResult] = useState<any>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [csvRtoSuggestion, setCsvRtoSuggestion] = useState<number | null>(null);
+  // Outcomes recorded inline against the guided manual checks — keyed by
+  // guidedChecks[].id. Reset whenever a new audit runs, so results always
+  // belong to the audit currently on screen.
+  const [guidedCheckOutcomes, setGuidedCheckOutcomes] = useState<Record<string, { outcome: 'pass' | 'fail' | 'unsure'; note: string }>>({});
   const [csvInputs, setCsvInputs] = useState<AuditInputs | null>(null);
   const [financialInputs, setFinancialInputs] = useState({ cogs: '', shipping: '', adSpend: '', settlementDays: '', newCustomers: '', rtoOrders: '' });
   const [isPullingShopify, setIsPullingShopify] = useState(false);
@@ -165,6 +171,21 @@ export default function App() {
     return reconcileLiveApiEvidence(scanResult, liveGa4, liveGtmMatch, deepScan);
   }, [scanResult, liveGa4, liveGtmMatch, deepScan]);
 
+  // Finish the audit in one sitting: a guided check marked "fail" becomes a
+  // real, top-ranked issue in the same report immediately — not a separate
+  // checklist you have to remember to reconcile with the findings later.
+  const manualCheckResults: ManualCheckResult[] = useMemo(
+    () =>
+      guidedChecks
+        .filter((c) => guidedCheckOutcomes[c.id])
+        .map((c) => ({ id: c.id, title: c.title, where: c.where, outcome: guidedCheckOutcomes[c.id].outcome, note: guidedCheckOutcomes[c.id].note })),
+    [guidedCheckOutcomes]
+  );
+  const mergedTopIssues = useMemo(() => {
+    if (!scanResult || scanResult.status === 'error') return null;
+    return mergeManualFindings(scanResult.report.topIssues, manualCheckResults);
+  }, [scanResult, manualCheckResults]);
+
   // ===== Tab 2 handlers =====
 
   const handlePullLiveOrders = async () => {
@@ -251,6 +272,7 @@ export default function App() {
     setLiveGa4(null);
     setLiveGtmMatch(null);
     setLiveDataError(null);
+    setGuidedCheckOutcomes({}); // a new audit needs its own fresh manual verification
 
     try {
       const result = await runFullAudit(
@@ -295,7 +317,13 @@ export default function App() {
     if (!scanResult) return;
     setIsExportingPdf(true);
     try {
-      const html = buildReportHtml(scanResult);
+      // The PDF must reflect the same manually-verified findings shown on
+      // screen, not just automated evidence — otherwise "finishing in one
+      // sitting" would still leave the exported report out of date.
+      const reportForExport = mergedTopIssues
+        ? { ...scanResult, report: { ...scanResult.report, topIssues: mergedTopIssues } }
+        : scanResult;
+      const html = buildReportHtml(reportForExport);
       const blob = await exportReportPdf(html);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -646,9 +674,44 @@ export default function App() {
                     <div style={{ display: 'grid', gap: '1.5rem' }}>
                       <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '12px', border: '1px solid #334155' }}>
                         <div style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '4px' }}>Guided next checks</div>
-                        <div style={{ color: '#94a3b8', fontSize: '0.75rem', marginBottom: '12px' }}>Use these to validate the likely leakage points manually.</div>
+                        <div style={{ color: '#94a3b8', fontSize: '0.75rem', marginBottom: '12px' }}>These stay manual on purpose — this app never clicks Add to Cart or Checkout for you. Mark the outcome here and it becomes a real, ranked issue below immediately, so you can finish the whole audit in one sitting instead of a separate follow-up.</div>
                         <div style={{ display: 'grid', gap: '10px' }}>
-                          {guidedChecks.map((check) => <div key={check.title} style={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', padding: '12px', fontSize: '0.8rem' }}><div style={{ fontWeight: 700 }}>{check.title} <a href={check.href} target="_blank" rel="noreferrer" style={{ color: '#38bdf8', marginLeft: '6px' }}>Open tool ↗</a></div><div style={{ color: '#cbd5e1', marginTop: '5px' }}><strong>Where:</strong> {check.where} · <strong>Look for:</strong> {check.lookFor}</div><div style={{ color: '#4ade80', marginTop: '5px' }}><strong>Good result:</strong> {check.good}</div></div>)}
+                          {guidedChecks.map((check) => {
+                            const recorded = guidedCheckOutcomes[check.id];
+                            const outcomeColor = recorded?.outcome === 'pass' ? '#4ade80' : recorded?.outcome === 'fail' ? '#fca5a5' : recorded?.outcome === 'unsure' ? '#fbbf24' : '#334155';
+                            return (
+                              <div key={check.id} style={{ backgroundColor: '#0f172a', border: `1px solid ${outcomeColor}`, borderRadius: '8px', padding: '12px', fontSize: '0.8rem' }}>
+                                <div style={{ fontWeight: 700 }}>{check.title} <a href={check.href} target="_blank" rel="noreferrer" style={{ color: '#38bdf8', marginLeft: '6px' }}>Open tool ↗</a></div>
+                                <div style={{ color: '#cbd5e1', marginTop: '5px' }}><strong>Where:</strong> {check.where} · <strong>Look for:</strong> {check.lookFor}</div>
+                                <div style={{ color: '#4ade80', marginTop: '5px' }}><strong>Good result:</strong> {check.good}</div>
+                                <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '10px', flexWrap: 'wrap' }}>
+                                  {(['pass', 'fail', 'unsure'] as const).map((outcome) => (
+                                    <button
+                                      key={outcome}
+                                      onClick={() => setGuidedCheckOutcomes((prev) => ({ ...prev, [check.id]: { outcome, note: prev[check.id]?.note || '' } }))}
+                                      style={{
+                                        backgroundColor: recorded?.outcome === outcome ? outcomeColor : 'transparent',
+                                        color: recorded?.outcome === outcome ? '#0f172a' : '#94a3b8',
+                                        border: `1px solid ${recorded?.outcome === outcome ? outcomeColor : '#475569'}`,
+                                        borderRadius: '6px', padding: '4px 10px', fontSize: '0.74rem', fontWeight: 600, cursor: 'pointer',
+                                      }}
+                                    >
+                                      {outcome === 'pass' ? '✓ Pass' : outcome === 'fail' ? '✗ Fail' : '? Unsure'}
+                                    </button>
+                                  ))}
+                                  {recorded?.outcome === 'fail' && (
+                                    <input
+                                      type="text"
+                                      placeholder="What did you actually see? (feeds the Top Issues detail below)"
+                                      defaultValue={recorded.note}
+                                      onBlur={(e) => setGuidedCheckOutcomes((prev) => ({ ...prev, [check.id]: { outcome: 'fail', note: e.target.value } }))}
+                                      style={{ flex: 1, minWidth: '220px', padding: '5px 8px', backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '6px', color: '#e2e8f0', fontSize: '0.74rem' }}
+                                    />
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                       {/* Overview Card */}
@@ -763,19 +826,19 @@ export default function App() {
 
                         <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' }}>
-                            <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Top Issues</div>
+                            <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Top Issues{manualCheckResults.length > 0 ? ' (includes your guided-check results below)' : ''}</div>
                             <div style={{ fontSize: '0.68rem', color: '#64748b' }}>
-                              {scanResult.report.topIssues.totalFound > 10
-                                ? `Showing top 10 of ${scanResult.report.topIssues.totalFound} found`
-                                : `${scanResult.report.topIssues.totalFound} found`}
+                              {mergedTopIssues!.totalFound > 10
+                                ? `Showing top 10 of ${mergedTopIssues!.totalFound} found`
+                                : `${mergedTopIssues!.totalFound} found`}
                             </div>
                           </div>
-                          {scanResult.report.topIssues.issues.length === 0 ? (
-                            <div style={{ fontSize: '0.78rem', color: '#4ade80' }}>✔ No confirmed issues from the evidence gathered — proceed to the guided checks above to validate what a scan can't see.</div>
+                          {mergedTopIssues!.issues.length === 0 ? (
+                            <div style={{ fontSize: '0.78rem', color: '#4ade80' }}>✔ No confirmed issues from the evidence gathered — proceed to the guided checks below to validate what a scan can't see.</div>
                           ) : (
                             <div style={{ display: 'grid', gap: '8px' }}>
-                              {scanResult.report.topIssues.issues.map((issue: { id: string; severity: DiagnosticSeverity; category: string; title: string; detail: string; firstCheck: string; amount?: number }, i: number) => (
-                                <div key={issue.id} style={{ fontSize: '0.76rem', borderLeft: `3px solid ${severityColor[issue.severity]}`, paddingLeft: '8px', paddingBottom: '6px', borderBottom: i < scanResult.report.topIssues.issues.length - 1 ? '1px solid #334155' : 'none' }}>
+                              {mergedTopIssues!.issues.map((issue: { id: string; severity: DiagnosticSeverity; category: string; title: string; detail: string; firstCheck: string; amount?: number }, i: number) => (
+                                <div key={issue.id} style={{ fontSize: '0.76rem', borderLeft: `3px solid ${severityColor[issue.severity]}`, paddingLeft: '8px', paddingBottom: '6px', borderBottom: i < mergedTopIssues!.issues.length - 1 ? '1px solid #334155' : 'none' }}>
                                   <div>
                                     <span style={{ color: severityColor[issue.severity], fontWeight: 700 }}>#{i + 1} {severityLabel[issue.severity]}</span>
                                     {' — '}<strong>{issue.title}</strong>
@@ -844,12 +907,12 @@ export default function App() {
                         </div>
                       ))}
                     </div>
-                    <h3 style={{ marginTop: '22px' }}>Priority actions {scanResult.report.topIssues.totalFound > 10 ? `(top 10 of ${scanResult.report.topIssues.totalFound})` : ''}</h3>
-                    {scanResult.report.topIssues.issues.length === 0 ? (
+                    <h3 style={{ marginTop: '22px' }}>Priority actions {mergedTopIssues!.totalFound > 10 ? `(top 10 of ${mergedTopIssues!.totalFound})` : ''}</h3>
+                    {mergedTopIssues!.issues.length === 0 ? (
                       <p style={{ color: '#334155' }}>No confirmed issues from the evidence gathered for this audit.</p>
                     ) : (
                       <ol style={{ paddingLeft: '20px', color: '#334155', lineHeight: 1.55 }}>
-                        {scanResult.report.topIssues.issues.map((issue: { id: string; title: string; detail: string; firstCheck: string }) => (
+                        {mergedTopIssues!.issues.map((issue: { id: string; title: string; detail: string; firstCheck: string }) => (
                           <li key={issue.id}><strong>{issue.title}:</strong> {issue.detail} <em>First check: {issue.firstCheck}</em></li>
                         ))}
                       </ol>

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTopIssues } from '../src/utils/topIssues.ts';
+import { buildTopIssues, mergeManualFindings } from '../src/utils/topIssues.ts';
+import type { ManualCheckResult, TopIssuesResult } from '../src/utils/topIssues.ts';
 import type { DiagnosticReport, DiagnosticFinding } from '../src/utils/diagnosticEngine.ts';
 import type { LeakItem } from '../src/utils/auditLogic.ts';
 
@@ -76,4 +77,31 @@ test('zero-amount leaks are not surfaced as issues at all', () => {
   const leaks: LeakItem[] = [{ name: 'RTO returns', amt: 0 }];
   const result = buildTopIssues(report([]), leaks, 'IN');
   assert.equal(result.totalFound, 0);
+});
+
+function baseTopIssues(): TopIssuesResult {
+  return { issues: [{ id: 'a', category: 'tracking', severity: 'high', title: 'A', detail: 'd', firstCheck: 'c' }], totalFound: 1 };
+}
+
+test('a failed manual check leads the list, ahead of every automated finding regardless of severity', () => {
+  const manual: ManualCheckResult[] = [{ id: 'purchase', title: 'Purchase firing', where: 'GTM Preview', outcome: 'fail', note: 'No purchase tag fired on test order' }];
+  const result = mergeManualFindings(baseTopIssues(), manual);
+  assert.equal(result.issues[0].category, 'manual');
+  assert.equal(result.issues[0].severity, 'critical');
+  assert.match(result.issues[0].detail, /No purchase tag fired on test order/);
+  assert.equal(result.totalFound, 2);
+});
+
+test('passed and unsure checks add nothing — only confirmed failures become issues', () => {
+  const manual: ManualCheckResult[] = [
+    { id: 'a', title: 'A', where: 'x', outcome: 'pass', note: '' },
+    { id: 'b', title: 'B', where: 'x', outcome: 'unsure', note: '' },
+  ];
+  const result = mergeManualFindings(baseTopIssues(), manual);
+  assert.deepEqual(result, baseTopIssues());
+});
+
+test('no manual results at all leaves the base list completely untouched', () => {
+  const result = mergeManualFindings(baseTopIssues(), []);
+  assert.deepEqual(result, baseTopIssues());
 });
