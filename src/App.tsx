@@ -853,6 +853,14 @@ export default function App() {
                         </div>
                       </div>
 
+                      {/* Compact, always-visible here too — not hidden behind the Client Report tab */}
+                      <details style={{ backgroundColor: '#1e293b', borderRadius: '12px', border: '1px solid #334155', padding: '0.75rem 1rem' }}>
+                        <summary style={{ cursor: 'pointer', fontSize: '0.82rem', color: '#94a3b8' }}>Audit scope &amp; limitations ({scanResult.report.scopeNotes.length})</summary>
+                        <ul style={{ paddingLeft: '18px', color: '#cbd5e1', lineHeight: 1.5, fontSize: '0.8rem', marginTop: '8px' }}>
+                          {scanResult.report.scopeNotes.map((note: { category: string; statement: string }, i: number) => <li key={i}><strong>{note.category}:</strong> {note.statement}</li>)}
+                        </ul>
+                      </details>
+
                       {/* Recommendations */}
                       <div style={{ backgroundColor: '#1e293b', padding: '1.5rem', borderRadius: '12px', border: '1px solid #334155' }}>
                         <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.1rem' }}>Audit Findings & Recommendations</h3>
@@ -917,9 +925,9 @@ export default function App() {
                         ))}
                       </ol>
                     )}
-                    <h3 style={{ marginTop: '22px' }}>Scope disclosures</h3>
+                    <h3 style={{ marginTop: '22px' }}>Audit scope &amp; limitations</h3>
                     <ul style={{ paddingLeft: '20px', color: '#334155', lineHeight: 1.55, fontSize: '0.9rem' }}>
-                      {scanResult.report.issueList.map((issue: { category: string; statement: string }, i: number) => <li key={i}><strong>{issue.category}:</strong> {issue.statement}</li>)}
+                      {scanResult.report.scopeNotes.map((note: { category: string; statement: string }, i: number) => <li key={i}><strong>{note.category}:</strong> {note.statement}</li>)}
                     </ul>
                     <div style={{ marginTop: '20px', padding: '12px', background: '#fff7ed', borderLeft: '4px solid #e8792c', color: '#7c2d12', fontSize: '0.85rem' }}>
                       Scope note: this report confirms supplied financial inputs and observable page signals ({scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML plus read-only deep-scan network evidence' : 'static HTML only — deep scan not run for this audit'}). Checkout and event implementation items require the stated validation steps.

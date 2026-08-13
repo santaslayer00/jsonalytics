@@ -52,9 +52,15 @@ const SEVERITY_RANK: Record<DiagnosticSeverity, number> = {
   info: 0,
 };
 
+export interface ManualIds {
+  gtmId?: string | null;
+  ga4Id?: string | null;
+}
+
 export function runDiagnostics(
   surface: SurfaceAuditResult,
-  deep: DeepScanResult | null
+  deep: DeepScanResult | null,
+  manual: ManualIds | null = null
 ): DiagnosticReport {
   const findings: DiagnosticFinding[] = [];
   const hasDeep = !!deep;
@@ -190,6 +196,49 @@ export function runDiagnostics(
         downstreamConsequences: ['Anyone checking the "obvious" GA4 property (the one in page source) will see no data and wrongly conclude tracking is broken.'],
         firstCheck: `Check GA4 property ${deep!.observedIds.ga4.join(', ')} directly — that is where this traffic is actually landing.`,
         requiresDeepScan: true,
+      });
+    }
+  }
+
+  // R4d/R4e — operator-supplied ID (Tab 2 only) doesn't match what evidence
+  // shows. Consolidated here rather than as a separate parallel check in
+  // auditLogic.ts, so there is exactly one place tracking-evidence findings
+  // come from regardless of which tab is asking. Only fires when evidence
+  // actually exists to compare against — an operator ID with nothing
+  // detected at all is already covered by no-measurement-layer above.
+  if (manual?.gtmId && allObservedGtmIds.length > 0 && !allObservedGtmIds.some((id) => id.toUpperCase() === manual.gtmId!.toUpperCase())) {
+    findings.push({
+      id: 'manual-gtm-mismatch',
+      severity: 'high',
+      confidence: 'measured',
+      title: 'Supplied GTM ID does not match what evidence shows',
+      observed: [`Supplied GTM ID: ${manual.gtmId}.`, `Evidence (static HTML + deep scan, where available) shows: ${allObservedGtmIds.join(', ')}.`],
+      proves: 'The GTM ID entered for this audit is not the one actually present on this page.',
+      doesNotProve: 'Nothing further — this is a direct, measured mismatch, not an inference.',
+      dependency: 'Every conclusion in this audit that assumes the supplied ID is correct needs re-checking once the right container is confirmed.',
+      downstreamConsequences: ['Findings framed around the wrong container may misdirect the fix.'],
+      firstCheck: `Confirm this is the right store/container — evidence points to ${allObservedGtmIds.join(', ')}, not ${manual.gtmId}.`,
+      requiresDeepScan: false,
+    });
+  }
+  {
+    const allObservedGa4Ids = Array.from(new Set([
+      ...(surface.ga4Id ? [surface.ga4Id] : []),
+      ...(hasDeep ? deep!.observedIds.ga4 : []),
+    ]));
+    if (manual?.ga4Id && allObservedGa4Ids.length > 0 && !allObservedGa4Ids.some((id) => id.toUpperCase() === manual.ga4Id!.toUpperCase())) {
+      findings.push({
+        id: 'manual-ga4-mismatch',
+        severity: 'high',
+        confidence: 'measured',
+        title: 'Supplied GA4 ID does not match what evidence shows',
+        observed: [`Supplied GA4 ID: ${manual.ga4Id}.`, `Evidence (static HTML + deep scan, where available) shows: ${allObservedGa4Ids.join(', ')}.`],
+        proves: 'The GA4 ID entered for this audit is not the one actually present/firing on this page.',
+        doesNotProve: 'Nothing further — this is a direct, measured mismatch, not an inference.',
+        dependency: 'Every conclusion in this audit that assumes the supplied ID is correct needs re-checking once the right property is confirmed.',
+        downstreamConsequences: ['Findings framed around the wrong property may misdirect the fix.'],
+        firstCheck: `Confirm this is the right property — evidence points to ${allObservedGa4Ids.join(', ')}, not ${manual.ga4Id}.`,
+        requiresDeepScan: false,
       });
     }
   }

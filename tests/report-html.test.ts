@@ -18,7 +18,7 @@ function baseResult(overrides: Partial<AuditDashboardResult['report']> = {}): Au
       signalSources: { dataLayer: 'unknown', stape: 'unknown', purchaseSignals: 'not-validated', consentMode: 'unknown' },
       evidenceDepth: 'static-only',
       signalFindings: [],
-      issueList: [],
+      scopeNotes: [],
       businessMetrics: [],
       topIssues: { issues: [], totalFound: 0 },
       ...overrides,

@@ -107,7 +107,8 @@ export interface AuditDashboardResult {
     signalSources: AuditSourceSignal;
     evidenceDepth: 'static-only' | 'static+deep'; // whether deep-scan network evidence was reconciled in, or this is static HTML alone
     signalFindings: SignalFinding[]; // detailed text list, rendered as-is, never as a card grid
-    issueList: AuditReportIssue[];
+    /** Audit-methodology caveats (what this scan can/cannot confirm) — NOT store issues. Real ranked issues are in topIssues. */
+    scopeNotes: AuditReportIssue[];
     businessMetrics: Array<{
       label: string;
       value: string;
@@ -441,7 +442,7 @@ export const runSurfaceAudit = async (
  * manualGtmId / manualGa4Id are optional user-supplied IDs, cross-checked
  * (case-insensitively) against what the live HTML scan actually detects.
  *
- * Output is a detailed TEXT report (signalFindings, issueList,
+ * Output is a detailed TEXT report (signalFindings, topIssues, scopeNotes,
  * businessMetrics, recommendations) — deliberately not a per-metric card
  * grid, so it reads as a report you can talk through on a client call.
  */
@@ -512,7 +513,7 @@ export const runFullAudit = async (
     });
   }
 
-  const issueList: AuditReportIssue[] = [
+  const scopeNotes: AuditReportIssue[] = [
     {
       category: 'Purchase signal validation',
       owner: 'Checkout / Pixel layer',
@@ -544,30 +545,14 @@ export const runFullAudit = async (
     },
   ];
 
-  if (gtmMismatch) {
-    issueList.push({
-      category: 'GTM ID mismatch',
-      owner: 'Tracking config',
-      severity: 'high',
-      statement: `Observed evidence shows ${effective.gtmId}, but ${manualGtmId} was supplied. One of these is wrong or stale.`,
-    });
-  }
-  if (ga4Mismatch) {
-    issueList.push({
-      category: 'GA4 ID mismatch',
-      owner: 'Tracking config',
-      severity: 'high',
-      statement: `Observed evidence shows ${effective.ga4Id}, but ${manualGa4Id} was supplied. One of these is wrong or stale.`,
-    });
-  }
-  if (!scan.hasCmp) {
-    issueList.push({
-      category: 'Consent tooling',
-      owner: 'Compliance / Tracking config',
-      severity: 'medium',
-      statement: 'No known consent-management script detected on page load. Confirm manually — Shopify\'s own native consent banner (if used) isn\'t covered by this signature list.',
-    });
-  }
+  // GTM/GA4 ID mismatch and "no CMP detected" used to be separate, parallel
+  // findings pushed only here — duplicating what the diagnostic engine
+  // already covers (or, for ID mismatch, could cover once it knows the
+  // manually-supplied IDs). Consolidated: diagnosticEngine.ts now owns all
+  // tracking-evidence findings including manual-ID reconciliation (see
+  // manual-gtm-mismatch/manual-ga4-mismatch below), and no-cmp-with-active-tags
+  // already covers the consent check. issueList/scopeNotes stays limited to
+  // genuine audit-methodology caveats — not a second, overlapping issues list.
 
   // ---- Triage: rank leaks by $ impact and flag where to look first ----
   const rankedLeaks = [...audit.leaks].sort((a, b) => b.amt - a.amt);
@@ -613,7 +598,8 @@ export const runFullAudit = async (
       blindSpotPct: effective.blindSpotPct,
       cards: [],
     },
-    deepEvidence
+    deepEvidence,
+    { gtmId: manualGtmId, ga4Id: manualGa4Id }
   );
   const topIssuesResult = buildTopIssues(diagnosticReport, audit.leaks, region);
 
@@ -688,7 +674,7 @@ export const runFullAudit = async (
       },
       evidenceDepth: deepEvidence ? 'static+deep' : 'static-only',
       signalFindings,
-      issueList,
+      scopeNotes,
       businessMetrics: [
         { label: 'Gross Revenue', value: formatCurrency(audit.grossRevenue, region), explainer: 'Total order value before any costs are subtracted — your top-line number.' },
         { label: 'ROAS', value: `${audit.roas.toFixed(2)}x`, explainer: 'For every $1 spent on ads, how many $ came back in revenue — below 1x means ads are losing money outright.' },
@@ -750,7 +736,7 @@ function buildFailedResult(storeUrl: string, errorMessage: string): AuditDashboa
       signalSources: { dataLayer: 'unknown', stape: 'unknown', purchaseSignals: 'not-validated', consentMode: 'unknown' },
       evidenceDepth: 'static-only',
       signalFindings: [],
-      issueList: [],
+      scopeNotes: [],
       businessMetrics: [],
       topIssues: { issues: [], totalFound: 0 },
     },
@@ -991,8 +977,8 @@ export function buildReportHtml(scanResult: AuditDashboardResult): string {
     <ul>${scanResult.report.businessMetrics
       .map((m) => `<li>${escapeHtml(m.label)}: ${escapeHtml(m.value)}</li>`)
       .join('')}</ul>
-    <h3>Findings</h3>
-    <ul>${scanResult.report.issueList
+    <h3>Audit Scope &amp; Limitations</h3>
+    <ul>${scanResult.report.scopeNotes
       .map((i) => `<li><b>${escapeHtml(i.category)}</b>: ${escapeHtml(i.statement)}</li>`)
       .join('')}</ul>
     <h3>Recommendations</h3>

@@ -96,3 +96,43 @@ test('clean evidence with no deep scan yields a hedged, non-blocking result, not
   assert.equal(report.earliestFailure, null);
   assert.equal(report.evidenceDepth, 'surface-only');
 });
+
+// Consolidated here (was a separate, parallel check in auditLogic.ts) so
+// there is exactly one place tracking-evidence findings come from,
+// regardless of whether Tab 1 (no manual IDs) or Tab 2 (operator-supplied
+// IDs) is asking.
+test('a manually-supplied GTM ID that matches nothing in evidence is a measured mismatch, not a guess', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'] });
+  const report = runDiagnostics(surface, null, { gtmId: 'GTM-WRONG002' });
+  const mismatch = report.findings.find((f) => f.id === 'manual-gtm-mismatch');
+  assert.ok(mismatch);
+  assert.equal(mismatch?.confidence, 'measured');
+  assert.match(mismatch!.observed.join(' '), /GTM-REAL0001/);
+});
+
+test('a manually-supplied GTM ID that DOES match evidence produces no mismatch finding', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'] });
+  const report = runDiagnostics(surface, null, { gtmId: 'gtm-real0001' }); // case-insensitive
+  assert.equal(report.findings.some((f) => f.id === 'manual-gtm-mismatch'), false);
+});
+
+test('no manual IDs supplied at all (Tab 1) never produces a manual-mismatch finding', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'] });
+  const report = runDiagnostics(surface, null, null);
+  assert.equal(report.findings.some((f) => f.id === 'manual-gtm-mismatch' || f.id === 'manual-ga4-mismatch'), false);
+});
+
+test('a manually-supplied GA4 ID mismatch is caught even when static HTML never declared a GA4 ID (only deep scan observed one)', () => {
+  const surface = baseSurface(); // no static ga4Id at all
+  const deep = baseDeep({ observedIds: { ga4: ['G-OBSERVED1'], gtm: [] } });
+  const report = runDiagnostics(surface, deep, { ga4Id: 'G-SUPPLIEDWRONG' });
+  const mismatch = report.findings.find((f) => f.id === 'manual-ga4-mismatch');
+  assert.ok(mismatch, 'expected mismatch using deep-scan-observed GA4 ID even with no static declaration');
+});
+
+test('a manually-supplied ID with zero evidence to compare against does not fire — no-measurement-layer already covers that case', () => {
+  const surface = baseSurface(); // nothing detected anywhere
+  const report = runDiagnostics(surface, null, { gtmId: 'GTM-ANYTHING' });
+  assert.equal(report.findings.some((f) => f.id === 'manual-gtm-mismatch'), false);
+  assert.equal(report.earliestFailure?.id, 'no-measurement-layer');
+});
