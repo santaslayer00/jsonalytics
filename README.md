@@ -83,3 +83,11 @@ cloud-metadata address) before every scan. See `tests/ssrf-guard.test.cjs`.
 The market selector (US / UK / CA / AU / IN) drives report currency
 formatting and privacy-law language (CCPA/CPRA, UK GDPR, PIPEDA, Australian
 Privacy Act, DPDP) — it is not cosmetic. See `src/utils/constants.ts`.
+
+## Lead register
+
+The "Leads" tab is a lean pipeline tracker, separate from the audit engine —
+store URL, status (`Interested` / `Not interested` / `In queue` / `In
+progress`), optional notes. Persists to `leads.json` (same pattern as
+`tokens.json`: local file, gitignored, never committed). Not a CRM — no
+history, no reminders, just "who to follow up with."

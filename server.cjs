@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
 const fs = require('fs');
+const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const app = express();
 
@@ -39,6 +40,28 @@ function loadTokens() {
 function saveTokens(tokens) {
   fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2));
 }
+
+// ---- Lead register (lightweight pipeline tracker, local file storage) ----
+// Deliberately not a CRM: one flat file, four statuses, no history/audit
+// trail. "Lean" per the product philosophy — this tracks operator intent
+// (who to follow up with), not scan evidence.
+const LEADS_FILE = path.join(__dirname, 'leads.json');
+const LEAD_STATUSES = ['interested', 'not_interested', 'in_queue', 'in_progress'];
+
+function loadLeads() {
+  try {
+    const data = JSON.parse(fs.readFileSync(LEADS_FILE, 'utf8'));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLeads(list) {
+  fs.writeFileSync(LEADS_FILE, JSON.stringify(list, null, 2));
+}
+
+let leads = loadLeads();
 
 const {
   SHOPIFY_STORE_DOMAIN,
@@ -462,6 +485,61 @@ app.get('/api/gtm/inspect', async (req, res) => {
     ]));
     res.json({ tags: tags.data.tag || [], triggers: triggers.data.trigger || [], limitation: 'Default workspace only; published version and firing behavior still require Preview evidence.' });
   } catch (err) { res.status(500).json({ error: 'GTM inspection failed', detail: err.message }); }
+});
+
+// ---- Lead register endpoints ----
+app.get('/api/leads', (_req, res) => {
+  res.json({ leads, statuses: LEAD_STATUSES });
+});
+
+app.post('/api/leads', (req, res) => {
+  const { storeUrl, storeName, status, notes } = req.body || {};
+  if (typeof storeUrl !== 'string' || !storeUrl.trim()) {
+    return res.status(400).json({ error: 'storeUrl is required' });
+  }
+  if (status !== undefined && !LEAD_STATUSES.includes(status)) {
+    return res.status(400).json({ error: `Invalid status. Must be one of: ${LEAD_STATUSES.join(', ')}` });
+  }
+  const now = new Date().toISOString();
+  const lead = {
+    id: crypto.randomUUID(),
+    storeUrl: storeUrl.trim(),
+    storeName: typeof storeName === 'string' ? storeName.trim() : '',
+    status: status || 'in_queue',
+    notes: typeof notes === 'string' ? notes : '',
+    createdAt: now,
+    updatedAt: now,
+  };
+  leads.push(lead);
+  saveLeads(leads);
+  res.status(201).json({ lead });
+});
+
+app.patch('/api/leads/:id', (req, res) => {
+  const lead = leads.find((l) => l.id === req.params.id);
+  if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+  const { status, notes, storeName } = req.body || {};
+  if (status !== undefined) {
+    if (!LEAD_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Must be one of: ${LEAD_STATUSES.join(', ')}` });
+    }
+    lead.status = status;
+  }
+  if (notes !== undefined) lead.notes = typeof notes === 'string' ? notes : lead.notes;
+  if (storeName !== undefined) lead.storeName = typeof storeName === 'string' ? storeName : lead.storeName;
+  lead.updatedAt = new Date().toISOString();
+
+  saveLeads(leads);
+  res.json({ lead });
+});
+
+app.delete('/api/leads/:id', (req, res) => {
+  const idx = leads.findIndex((l) => l.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Lead not found' });
+  const [removed] = leads.splice(idx, 1);
+  saveLeads(leads);
+  res.json({ removed });
 });
 
 const PORT = 4000;

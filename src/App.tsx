@@ -14,6 +14,7 @@ import { resolveEffectiveSignals, buildSurfaceCards, reconcileLiveApiEvidence } 
 import { runDiagnostics } from './utils/diagnosticEngine';
 import type { DiagnosticSeverity } from './utils/diagnosticEngine';
 import { CSVUploader } from './components/stage2/CSVUploader';
+import { LeadRegister } from './components/leads/LeadRegister';
 import { getAdapterStateLabel } from './utils/sourceAdapters';
 import { REGIONS } from './utils/constants';
 import type { Region } from './utils/constants';
@@ -33,7 +34,7 @@ const severityLabel: Record<DiagnosticSeverity, string> = {
   info: 'CLEAR',
 };
 
-type TabKey = 'noAccess' | 'withAccess' | 'clientReport';
+type TabKey = 'noAccess' | 'withAccess' | 'clientReport' | 'leads';
 
 const toneColor: Record<string, string> = {
   good: '#4ade80',
@@ -387,6 +388,9 @@ export default function App() {
               </button>
               <button style={{ ...tabButtonStyle('clientReport'), opacity: scanResult ? 1 : 0.55 }} onClick={() => scanResult && setActiveTab('clientReport')} disabled={!scanResult}>
                 📄 Client Report
+              </button>
+              <button style={tabButtonStyle('leads')} onClick={() => setActiveTab('leads')}>
+                📋 Leads
               </button>
             </div>
             <div style={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderTop: 'none', borderRadius: '0 0 12px 12px', padding: '1.5rem', marginBottom: '2rem' }}>
@@ -826,6 +830,11 @@ export default function App() {
                     <button onClick={handleExportPdf} disabled={isExportingPdf} style={{ backgroundColor: '#b45309', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>{isExportingPdf ? 'Generating PDF...' : 'Export Client PDF'}</button>
                   </div>
                 </div>
+              )}
+
+              {/* ================= TAB 4: LEADS ================= */}
+              {activeTab === 'leads' && !isMinimized && (
+                <LeadRegister prefillUrl={surfaceUrl || storeUrl} />
               )}
             </div>
           </>
