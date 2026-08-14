@@ -168,10 +168,17 @@ const PROXY_BASE = '/api';
  */
 const SURFACE_BENCHMARKS = {
   blindSpotWeights: {
-    missingGtm: 40,
-    missingGa4: 40,
-    missingMetaPixel: 10,
-    missingTiktokPixel: 10,
+    // GTM and GA4 are alternative PATHS to the same goal (a working
+    // analytics layer) — GA4 can run directly via gtag.js or Shopify's
+    // native integration with no GTM container at all, which is a
+    // perfectly legitimate setup. Treating "no GTM" as an independent
+    // 40-point penalty on top of "no GA4" double-counts one real gap as
+    // two. Only dock the full penalty when NEITHER is present — the
+    // literal "GTM not detected" fact still shows in missingSignalCount
+    // (unchanged, always honest), just not double-weighted in the score.
+    missingCoreAnalytics: 70,
+    missingMetaPixel: 15,
+    missingTiktokPixel: 15,
   },
 };
 
@@ -296,10 +303,10 @@ export function resolveEffectiveSignals(scan: SignalSource, deep: DeepScanResult
   const missingSignalCount = signals.filter((s) => !s).length;
 
   const w = SURFACE_BENCHMARKS.blindSpotWeights;
+  const hasCoreAnalytics = gtmDetected || ga4Detected;
   const blindSpotPct = Math.min(
     100,
-    (gtmDetected ? 0 : w.missingGtm) +
-      (ga4Detected ? 0 : w.missingGa4) +
+    (hasCoreAnalytics ? 0 : w.missingCoreAnalytics) +
       (metaDetected ? 0 : w.missingMetaPixel) +
       (tiktokDetected ? 0 : w.missingTiktokPixel)
   );
@@ -896,7 +903,8 @@ export function reconcileLiveApiEvidence(
   result: Pick<AuditDashboardResult, 'metrics'>,
   liveGa4: Ga4LiveMetrics | null,
   gtmMatch: { matched: boolean; containerName?: string } | null,
-  deep: DeepScanResult | null
+  deep: DeepScanResult | null,
+  region: Region = 'US'
 ): ApiReconciliationFinding[] {
   const findings: ApiReconciliationFinding[] = [];
 
@@ -914,10 +922,26 @@ export function reconcileLiveApiEvidence(
       if (deep && !hasEcommerceEvidence) {
         findings.push({
           tone: 'warn',
-          text: `GA4 reports ${liveGa4.conversions} conversions / $${liveGa4.purchaseRevenue.toLocaleString()} revenue for this window, but the storefront deep scan found no ecommerce dataLayer fields on page load. This isn't a contradiction by itself (conversions happen at checkout, not the homepage) — but if GA4 revenue doesn't reconcile with Shopify order totals for the same window, check how GA4 is receiving purchase data.`,
+          text: `GA4 reports ${liveGa4.conversions} conversions / ${formatCurrency(liveGa4.purchaseRevenue, region)} revenue for this window, but the storefront deep scan found no ecommerce dataLayer fields on page load. This isn't a contradiction by itself (conversions happen at checkout, not the homepage) — but if GA4 revenue doesn't reconcile with Shopify order totals for the same window, check how GA4 is receiving purchase data.`,
         });
       } else {
-        findings.push({ tone: 'good', text: `GA4 reports real conversions (${liveGa4.conversions}) and revenue ($${liveGa4.purchaseRevenue.toLocaleString()}) for this window — cross-check the revenue figure against Shopify order totals for the same date range before trusting it as final.` });
+        findings.push({ tone: 'good', text: `GA4 reports real conversions (${liveGa4.conversions}) and revenue (${formatCurrency(liveGa4.purchaseRevenue, region)}) for this window.` });
+      }
+
+      // Actual comparison against the confirmed Shopify figure, not just a
+      // suggestion to go do it — both numbers are already in scope. Always
+      // "warn" tone rather than an invented pass/fail threshold: a
+      // percentage cutoff for "acceptable drift" would be a fabricated
+      // benchmark with no real basis, and this is only a fair comparison at
+      // all when both pulls used the same date range, which this function
+      // has no way to confirm from here.
+      if (liveGa4.purchaseRevenue > 0 && result.metrics.grossRevenue > 0) {
+        const diffPct = ((liveGa4.purchaseRevenue - result.metrics.grossRevenue) / result.metrics.grossRevenue) * 100;
+        const sign = diffPct >= 0 ? '+' : '';
+        findings.push({
+          tone: 'warn',
+          text: `GA4 revenue (${formatCurrency(liveGa4.purchaseRevenue, region)}) vs. confirmed Shopify revenue (${formatCurrency(result.metrics.grossRevenue, region)}) for this audit: ${sign}${diffPct.toFixed(0)}% difference. Only a fair comparison if both used the same date range — refunds, currency conversion, and attribution timing can also explain a gap. Reconcile the date ranges before treating this as a tracking problem.`,
+        });
       }
     } else if (result.metrics.ga4Active && liveGa4.sessions === 0) {
       findings.push({

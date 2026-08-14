@@ -52,3 +52,37 @@ test('no live data at all -> no findings, not fabricated ones', () => {
   const findings = reconcileLiveApiEvidence(okResult, null, null, null);
   assert.equal(findings.length, 0);
 });
+
+// Was previously just a suggestion ("cross-check this yourself") — both
+// numbers are already in scope, so it should be a real computed comparison.
+test('GA4 revenue is actually compared against confirmed Shopify revenue, not just suggested as a manual step', () => {
+  const resultWithRevenue = { metrics: { ga4Active: true, grossRevenue: 10_000 } } as any;
+  const deep = baseDeep({ eventEvidence: [{ event: 'purchase', ecommerceFields: ['value'], evidence: 'observed-on-page-load' }] });
+  const findings = reconcileLiveApiEvidence(resultWithRevenue, { sessions: 10, totalUsers: 8, conversions: 3, purchaseRevenue: 12_000 }, null, deep);
+  const comparison = findings.find((f) => /vs\. confirmed Shopify revenue/.test(f.text));
+  assert.ok(comparison, 'expected an explicit GA4-vs-Shopify comparison finding');
+  assert.match(comparison!.text, /\+20%/, 'should compute the actual percentage difference, not just flag that one exists');
+});
+
+test('the revenue comparison never asserts a pass/fail threshold — always hedged, always "warn"', () => {
+  // Even a near-perfect match should not be silently upgraded to "good" —
+  // no invented threshold for what counts as "close enough."
+  const resultWithRevenue = { metrics: { ga4Active: true, grossRevenue: 10_000 } } as any;
+  const findings = reconcileLiveApiEvidence(resultWithRevenue, { sessions: 10, totalUsers: 8, conversions: 3, purchaseRevenue: 10_010 }, null, null);
+  const comparison = findings.find((f) => /vs\. confirmed Shopify revenue/.test(f.text));
+  assert.equal(comparison!.tone, 'warn');
+  assert.match(comparison!.text, /same date range/i);
+});
+
+test('formatCurrency/region actually flows through this function — not hard-coded to $', () => {
+  const resultWithRevenue = { metrics: { ga4Active: true, grossRevenue: 10_000 } } as any;
+  const findings = reconcileLiveApiEvidence(resultWithRevenue, { sessions: 10, totalUsers: 8, conversions: 3, purchaseRevenue: 12_000 }, null, null, 'IN');
+  const comparison = findings.find((f) => /vs\. confirmed Shopify revenue/.test(f.text));
+  assert.match(comparison!.text, /₹/, 'IN region should render rupee symbol, not a hard-coded $');
+});
+
+test('no comparison is fabricated when either revenue figure is zero/missing', () => {
+  const resultNoRevenue = { metrics: { ga4Active: true, grossRevenue: 0 } } as any;
+  const findings = reconcileLiveApiEvidence(resultNoRevenue, { sessions: 10, totalUsers: 8, conversions: 3, purchaseRevenue: 5000 }, null, null);
+  assert.equal(findings.some((f) => /vs\. confirmed Shopify revenue/.test(f.text)), false);
+});

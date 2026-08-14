@@ -168,8 +168,8 @@ export default function App() {
   // live API actually reports against what was observed on the storefront.
   const apiReconciliation = useMemo(() => {
     if (!scanResult || scanResult.status === 'error') return [];
-    return reconcileLiveApiEvidence(scanResult, liveGa4, liveGtmMatch, deepScan);
-  }, [scanResult, liveGa4, liveGtmMatch, deepScan]);
+    return reconcileLiveApiEvidence(scanResult, liveGa4, liveGtmMatch, deepScan, region);
+  }, [scanResult, liveGa4, liveGtmMatch, deepScan, region]);
 
   // Finish the audit in one sitting: a guided check marked "fail" becomes a
   // real, top-ranked issue in the same report immediately — not a separate
