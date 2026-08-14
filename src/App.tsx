@@ -109,25 +109,35 @@ export default function App() {
 
   // ===== Tab 1 handlers =====
 
+  // Both the static and deep scan are read-only (no clicks, no cart/checkout
+  // mutation — same safety guarantee either way), so there's no reason to
+  // make "run the deep scan" a separate manual step the operator has to
+  // remember. One click now runs both, concurrently, and the result already
+  // reflects the strongest evidence available instead of showing an
+  // intermediate "nothing detected yet, go run deep scan" state first.
   const handleSurfaceScan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!surfaceUrl) return;
     setIsSurfaceScanning(true);
+    setIsSurfaceDeepScanning(true);
     setSurfaceResult(null);
     setSurfaceError(null);
     setSurfaceDeepScan(null);
     setSurfaceDeepScanError(null);
-    try {
-      const result = await runSurfaceAudit(surfaceUrl, region);
-      setSurfaceResult(result);
-      if (result.status === 'error') {
-        setSurfaceError(result.error || 'Scan failed.');
-      }
-    } catch (err: any) {
-      setSurfaceError(err.message || 'Scan failed unexpectedly.');
-    } finally {
-      setIsSurfaceScanning(false);
-    }
+    await Promise.all([
+      (async () => {
+        try {
+          const result = await runSurfaceAudit(surfaceUrl, region);
+          setSurfaceResult(result);
+          if (result.status === 'error') setSurfaceError(result.error || 'Scan failed.');
+        } catch (err: any) {
+          setSurfaceError(err.message || 'Scan failed unexpectedly.');
+        } finally {
+          setIsSurfaceScanning(false);
+        }
+      })(),
+      handleSurfaceDeepScan(),
+    ]);
   };
 
   const handleSurfaceDeepScan = async () => {
@@ -315,6 +325,25 @@ export default function App() {
     setLiveDataError(null);
     setGuidedCheckOutcomes({}); // a new audit needs its own fresh manual verification
 
+    // Auto-run the deep scan alongside the audit if it hasn't already been
+    // run for this exact URL (e.g. via a manual "Inspect dataLayer" click) —
+    // same read-only guarantee either way, no reason to make it a separate
+    // step the operator has to remember before every audit.
+    let deepEvidence = validAuditDeepScan;
+    if (!deepEvidence) {
+      setIsAuditDeepScanning(true);
+      setAuditDeepScanError(null);
+      try {
+        deepEvidence = await fetchDeepScan(storeUrl);
+        setAuditDeepScan(deepEvidence);
+      } catch (err: any) {
+        setAuditDeepScanError(err.message || 'Deep scan failed.');
+        deepEvidence = null; // fall back to static-only evidence rather than blocking the audit entirely
+      } finally {
+        setIsAuditDeepScanning(false);
+      }
+    }
+
     try {
       const result = await runFullAudit(
         storeUrl,
@@ -330,7 +359,7 @@ export default function App() {
         gtmIdInput.trim() || null,
         ga4IdInput.trim() || null,
         region,
-        validAuditDeepScan
+        deepEvidence
       );
       setScanResult(result);
       if (result.status === 'error') {
@@ -485,20 +514,24 @@ export default function App() {
                     />
                     <button
                       type="submit"
-                      disabled={isSurfaceScanning}
+                      disabled={isSurfaceScanning || isSurfaceDeepScanning}
                       style={{ backgroundColor: '#b45309', color: '#fff', border: 'none', padding: '0 24px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}
                     >
-                      {isSurfaceScanning ? 'Scanning...' : 'Scan Store'}
+                      {isSurfaceScanning || isSurfaceDeepScanning ? 'Scanning...' : 'Scan Store'}
                     </button>
                     <button
                       type="button"
                       onClick={() => handleSurfaceDeepScan()}
                       disabled={isSurfaceDeepScanning || !surfaceUrl}
+                      title="Scan Store already runs this automatically — use this only to refresh evidence without re-running everything."
                       style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #334155', padding: '0 16px', borderRadius: '8px', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer' }}
                     >
-                      {isSurfaceDeepScanning ? 'Running read-only inspection...' : '🔍 Read-only Deep Scan'}
+                      {isSurfaceDeepScanning ? 'Running...' : '🔄 Re-scan'}
                     </button>
                   </form>
+                  <div style={{ color: '#64748b', fontSize: '0.72rem', marginTop: '-4px', marginBottom: '10px' }}>
+                    "Scan Store" now runs the read-only deep scan automatically — no separate step needed.
+                  </div>
 
                   {surfaceError && (
                     <div style={{ marginBottom: '12px', color: '#fca5a5', fontSize: '0.82rem', backgroundColor: 'rgba(229,72,77,0.08)', border: '1px solid rgba(229,72,77,0.3)', borderRadius: '8px', padding: '10px 14px' }}>
@@ -547,15 +580,18 @@ export default function App() {
                         </div>
                       )}
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', marginTop: '1.25rem' }}>
-                        {enrichedCards.map((card, i) => (
-                          <div key={i} style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+                        {enrichedCards.filter((c) => !c.locked).map((card, i) => (
+                          <div key={i} style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '10px', padding: '10px 14px' }}>
                             <div style={{ color: '#94a3b8', fontSize: '0.72rem', letterSpacing: '0.5px', textTransform: 'uppercase' }}>{card.label}</div>
-                            <div style={{ marginTop: '6px', fontSize: '1.1rem', fontWeight: 700, color: toneColor[card.tone] }}>{card.value}</div>
-                            <div style={{ marginTop: '6px', color: '#cbd5e1', fontSize: '0.76rem', lineHeight: 1.35 }}>{card.explainer}</div>
-                            {card.confidence && <div style={{ marginTop: '7px', color: '#94a3b8', fontSize: '0.68rem', lineHeight: 1.3 }}>Unconfirmed: {card.confidence}</div>}
+                            <div style={{ marginTop: '4px', fontSize: '1.05rem', fontWeight: 700, color: toneColor[card.tone] }}>{card.value}</div>
                           </div>
                         ))}
                       </div>
+                      {enrichedCards.some((c) => c.locked) && (
+                        <div style={{ color: '#64748b', fontSize: '0.72rem', marginTop: '8px' }}>
+                          {enrichedCards.filter((c) => c.locked).map((c) => c.label).join(' · ')} — needs live access (With Access tab)
+                        </div>
+                      )}
 
                       {surfaceDeepScanStale && (
                         <div style={{ color: '#fbbf24', fontSize: '0.75rem', marginTop: '1.25rem' }}>⚠ Deep scan evidence was for a different URL — re-run "Read-only Deep Scan" for this one.</div>
@@ -701,8 +737,8 @@ export default function App() {
 
                   <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '12px', border: '1px solid #334155', marginBottom: '1rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
-                      <div><div style={{ fontSize: '0.9rem', fontWeight: 700 }}>dataLayer evidence</div><div style={{ color: '#94a3b8', fontSize: '0.75rem', marginTop: '4px' }}>Read-only browser evidence; it does not validate checkout purchase firing.</div></div>
-                      <button onClick={() => handleAuditDeepScan()} disabled={isAuditDeepScanning || !storeUrl} style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #475569', padding: '9px 13px', borderRadius: '8px', cursor: 'pointer' }}>{isAuditDeepScanning ? 'Inspecting...' : 'Inspect dataLayer'}</button>
+                      <div><div style={{ fontSize: '0.9rem', fontWeight: 700 }}>dataLayer evidence</div><div style={{ color: '#94a3b8', fontSize: '0.75rem', marginTop: '4px' }}>"Audit Store" runs this automatically. Read-only; does not validate checkout purchase firing.</div></div>
+                      <button onClick={() => handleAuditDeepScan()} disabled={isAuditDeepScanning || !storeUrl} title="Audit Store already runs this automatically — use this only to refresh evidence on its own." style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #475569', padding: '9px 13px', borderRadius: '8px', cursor: 'pointer' }}>{isAuditDeepScanning ? 'Inspecting...' : '🔄 Re-scan'}</button>
                     </div>
                     {auditDeepScanError && <div style={{ color: '#fca5a5', fontSize: '0.78rem', marginTop: '8px' }}>❌ {auditDeepScanError}</div>}
                     {auditDeepScanStale && (
@@ -842,7 +878,7 @@ export default function App() {
                             <div style={{ color: '#e2e8f0', fontWeight: 700 }}>Stape: {scanResult.report.signalSources.stape}</div>
                             <div style={{ color: '#e2e8f0', fontWeight: 700 }}>Purchase: {scanResult.report.signalSources.purchaseSignals}</div>
                             <div style={{ marginTop: '6px', color: scanResult.report.evidenceDepth === 'static+deep' ? '#4ade80' : '#fbbf24', fontSize: '0.72rem' }}>
-                              Evidence: {scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML + deep scan' : 'static HTML only — run "Inspect dataLayer" above, then re-audit for stronger evidence'}
+                              Evidence: {scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML + deep scan' : 'static HTML only — deep scan failed for this audit, see the error above'}
                             </div>
                           </div>
                           <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
