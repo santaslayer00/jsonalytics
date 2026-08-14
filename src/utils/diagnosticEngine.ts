@@ -73,18 +73,20 @@ export function runDiagnostics(
     deep.trackingSignals.tiktokBrowserRequests > 0
   );
 
-  // R1 — nothing at all
-  if (!anyStaticTag && (!hasDeep || !anyObservedRequest)) {
+  // R1a — thorough check: BOTH static HTML and deep-scan network requests
+  // confirm nothing. This is the only case that earns "critical" — it's
+  // backed by everything this app can gather.
+  if (hasDeep && !anyStaticTag && !anyObservedRequest) {
     findings.push({
       id: 'no-measurement-layer',
       severity: 'critical',
-      confidence: hasDeep ? 'high' : 'medium',
+      confidence: 'high',
       title: 'No measurement layer detected on page load',
       observed: [
         'No GTM container ID, GA4 measurement ID, Meta Pixel, or TikTok Pixel signature found in the page HTML.',
-        hasDeep ? 'No matching tracking network requests observed during the read-only page-load scan.' : 'Deep scan not yet run — network-request evidence not available.',
+        'No matching tracking network requests observed during the read-only page-load scan.',
       ],
-      proves: 'The homepage, as loaded by an unauthenticated visitor, ships no detectable tracking code.',
+      proves: 'The homepage, as loaded by an unauthenticated visitor, ships no detectable tracking code — confirmed by both the static HTML pass and the deep scan\'s network-request evidence.',
       doesNotProve: 'This does not prove tracking is absent store-wide — it could be gated behind consent, loaded only on other templates, or blocked by bot protection during this scan.',
       dependency: 'Every downstream metric (attribution, ROAS measurement, retargeting audiences, GA4 reporting) depends on a measurement layer existing first. This is the earliest possible failure — there is nothing upstream of it.',
       downstreamConsequences: [
@@ -94,6 +96,34 @@ export function runDiagnostics(
       ],
       firstCheck: 'Confirm in Shopify Admin whether a GTM container or GA4 tag is configured at all (Online Store > Preferences, or Custom Pixels). If one is configured, re-scan — it may be blocked by this run or gated behind consent-on-load.',
       requiresDeepScan: false,
+    });
+  }
+  // R1b — static HTML alone shows nothing, but the deep scan hasn't run
+  // yet: an INCOMPLETE check, not a confirmed absence. Static-only evidence
+  // is genuinely weak — a second GTM container, consent-gated tags, and
+  // dynamically-injected pixels routinely never appear in raw page source
+  // at all (confirmed on a real store earlier this session). Presenting
+  // this with the same "critical, point to first" alarm as the thorough
+  // case above would claim more than a single, shallow pass actually
+  // supports — this is the exact overclaim the whole engine exists to
+  // avoid. Lower severity, and the first action is "go run the deep scan,"
+  // not "act on this as if it were settled."
+  else if (!hasDeep && !anyStaticTag) {
+    findings.push({
+      id: 'static-scan-only-inconclusive',
+      severity: 'medium',
+      confidence: 'low',
+      title: 'Static HTML shows no tracking signatures — deep scan not yet run',
+      observed: [
+        'No GTM container ID, GA4 measurement ID, Meta Pixel, or TikTok Pixel signature found in the page HTML.',
+        'The deep scan (real network requests, dataLayer, consent signals) has not been run yet.',
+      ],
+      proves: 'Only that the raw page source has no tracking signatures on it.',
+      doesNotProve: 'Whether tracking actually exists — this is the weakest evidence tier this app has. A second GTM container chain-loaded by the first, tags gated behind consent, or dynamically-injected pixels routinely show nothing in static HTML while working fine.',
+      dependency: 'The deep scan is a precondition for a meaningful conclusion here, not an optional extra — nothing downstream of this finding should be acted on until it runs.',
+      downstreamConsequences: [],
+      firstCheck: 'Run the read-only deep scan before concluding anything is missing — static HTML alone is not strong enough evidence either way.',
+      requiresDeepScan: true,
     });
   }
 

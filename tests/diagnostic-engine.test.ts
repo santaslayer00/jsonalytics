@@ -39,10 +39,23 @@ function baseDeep(overrides: Partial<DeepScanResult> = {}): DeepScanResult {
   };
 }
 
-test('no tags anywhere -> critical no-measurement-layer is the earliest failure', () => {
+// Regression test for real user feedback: a static-only scan (deep scan not
+// run yet) showing nothing is genuinely weak evidence -- presenting it with
+// the same CRITICAL alarm as a thorough check that also confirmed zero
+// network requests overclaims what a single shallow pass actually supports.
+test('no tags anywhere, deep scan NOT run yet -> a hedged, lower-severity "incomplete" finding, not a false-alarm CRITICAL', () => {
   const report = runDiagnostics(baseSurface(), null);
+  assert.equal(report.earliestFailure?.id, 'static-scan-only-inconclusive');
+  assert.equal(report.earliestFailure?.severity, 'medium');
+  assert.match(report.earliestFailure!.firstCheck, /run the read-only deep scan/i);
+});
+
+test('no tags anywhere, deep scan run AND also confirms nothing -> genuinely critical, this is the only case that earns it', () => {
+  const deep = baseDeep({ trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, serverSideEndpointCandidates: [] } });
+  const report = runDiagnostics(baseSurface(), deep);
   assert.equal(report.earliestFailure?.id, 'no-measurement-layer');
   assert.equal(report.earliestFailure?.severity, 'critical');
+  assert.equal(report.earliestFailure?.confidence, 'high');
 });
 
 test('GTM/GA4 present but no dataLayer -> tags-without-datalayer beats a lower-severity finding', () => {
@@ -130,9 +143,9 @@ test('a manually-supplied GA4 ID mismatch is caught even when static HTML never 
   assert.ok(mismatch, 'expected mismatch using deep-scan-observed GA4 ID even with no static declaration');
 });
 
-test('a manually-supplied ID with zero evidence to compare against does not fire — no-measurement-layer already covers that case', () => {
+test('a manually-supplied ID with zero evidence to compare against does not fire — the no-evidence-at-all finding already covers that case', () => {
   const surface = baseSurface(); // nothing detected anywhere
   const report = runDiagnostics(surface, null, { gtmId: 'GTM-ANYTHING' });
   assert.equal(report.findings.some((f) => f.id === 'manual-gtm-mismatch'), false);
-  assert.equal(report.earliestFailure?.id, 'no-measurement-layer');
+  assert.equal(report.earliestFailure?.id, 'static-scan-only-inconclusive');
 });
