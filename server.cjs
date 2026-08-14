@@ -203,7 +203,19 @@ app.get('/api/scan/deep', async (req, res) => {
       return r.continue().catch(() => {});
     });
 
-    await page.goto(target, { waitUntil: 'networkidle2', timeout: 20000 });
+    // networkidle2 (wait for <=2 in-flight connections) sounds right for
+    // "let tracking scripts settle," but real sites commonly never reach it
+    // at all: live-chat widgets, retargeting beacons, and websocket
+    // keep-alives keep background traffic running indefinitely, so the
+    // whole scan would time out and fail on exactly the kind of
+    // well-instrumented site this tool is most useful against. Confirmed
+    // live against a real store (gymshark.com) during testing — hit this
+    // exact timeout. domcontentloaded is fast and reliable regardless of
+    // background traffic; the fixed settle delay after it gives GTM/GA4/
+    // pixel scripts time to initialize and fire their first requests,
+    // which is what this scan actually needs to observe.
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await new Promise((resolve) => setTimeout(resolve, 4000));
 
     const dataLayerContents = await page.evaluate(() => {
       try { return Array.isArray(window.dataLayer) ? window.dataLayer.slice(0, 25) : null; }
