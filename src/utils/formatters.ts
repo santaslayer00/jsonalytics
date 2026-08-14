@@ -53,6 +53,28 @@ export const formatRelativeTime = (isoTimestamp: string, now: number = Date.now(
 };
 
 /**
+ * Normalizes a URL for same-store comparison (not navigation) — trims,
+ * adds a scheme if missing, lowercases the host, strips a trailing slash.
+ * Used to guard against stale evidence: a deep scan is only valid for the
+ * exact URL it was run against, and the operator can switch tabs or edit
+ * the URL field after scanning, in either order.
+ */
+export const normalizeUrlForCompare = (url: string): string => {
+  let target = url.trim();
+  if (!/^https?:\/\//i.test(target)) target = `https://${target}`;
+  try {
+    const u = new URL(target);
+    return `${u.hostname.toLowerCase()}${u.pathname.replace(/\/$/, '')}`;
+  } catch {
+    return target.toLowerCase();
+  }
+};
+
+/** True only if `deepScanUrl` (the URL a deep scan was actually run against) matches `targetUrl` (the URL currently in play). */
+export const isSameStoreUrl = (deepScanUrl: string, targetUrl: string): boolean =>
+  normalizeUrlForCompare(deepScanUrl) === normalizeUrlForCompare(targetUrl);
+
+/**
  * Detects the most likely region from a URL.
  */
 export const detectRegionFromUrl = (url: string): Region => {

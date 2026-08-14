@@ -20,7 +20,7 @@ import { LeadRegister } from './components/leads/LeadRegister';
 import { getAdapterStateLabel } from './utils/sourceAdapters';
 import { REGIONS } from './utils/constants';
 import type { Region } from './utils/constants';
-import { formatCurrency } from './utils/formatters';
+import { formatCurrency, isSameStoreUrl } from './utils/formatters';
 
 const severityColor: Record<DiagnosticSeverity, string> = {
   critical: '#fca5a5',
@@ -63,12 +63,19 @@ export default function App() {
   const [isSurfaceScanning, setIsSurfaceScanning] = useState(false);
   const [surfaceResult, setSurfaceResult] = useState<SurfaceAuditResult | null>(null);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
-  const [deepScan, setDeepScan] = useState<DeepScanResult | null>(null);
-  const [isDeepScanning, setIsDeepScanning] = useState(false);
-  const [deepScanError, setDeepScanError] = useState<string | null>(null);
+  // Deliberately separate from Tab 2's audit-deep-scan state below (and from
+  // each other's URL) — sharing one slot across tabs let Tab 1's deep-scan
+  // evidence for one store get silently attributed to Tab 2's audit of a
+  // completely different store. See validSurfaceDeepScan/validAuditDeepScan.
+  const [surfaceDeepScan, setSurfaceDeepScan] = useState<DeepScanResult | null>(null);
+  const [isSurfaceDeepScanning, setIsSurfaceDeepScanning] = useState(false);
+  const [surfaceDeepScanError, setSurfaceDeepScanError] = useState<string | null>(null);
 
   // ---- Tab 2: With Access ----
   const [storeUrl, setStoreUrl] = useState('');
+  const [auditDeepScan, setAuditDeepScan] = useState<DeepScanResult | null>(null);
+  const [isAuditDeepScanning, setIsAuditDeepScanning] = useState(false);
+  const [auditDeepScanError, setAuditDeepScanError] = useState<string | null>(null);
   const [gtmIdInput, setGtmIdInput] = useState('');
   const [ga4IdInput, setGa4IdInput] = useState('');
   const [ga4PropertyIdInput, setGa4PropertyIdInput] = useState('');
@@ -108,8 +115,8 @@ export default function App() {
     setIsSurfaceScanning(true);
     setSurfaceResult(null);
     setSurfaceError(null);
-    setDeepScan(null);
-    setDeepScanError(null);
+    setSurfaceDeepScan(null);
+    setSurfaceDeepScanError(null);
     try {
       const result = await runSurfaceAudit(surfaceUrl, region);
       setSurfaceResult(result);
@@ -123,36 +130,70 @@ export default function App() {
     }
   };
 
-  const handleDeepScan = async (targetUrl: string) => {
-    if (!targetUrl) return;
-    setIsDeepScanning(true);
-    setDeepScanError(null);
+  const handleSurfaceDeepScan = async () => {
+    if (!surfaceUrl) return;
+    setIsSurfaceDeepScanning(true);
+    setSurfaceDeepScanError(null);
     try {
-      const result = await fetchDeepScan(targetUrl);
-      setDeepScan(result);
+      setSurfaceDeepScan(await fetchDeepScan(surfaceUrl));
     } catch (err: any) {
-      setDeepScanError(err.message || 'Deep scan failed.');
+      setSurfaceDeepScanError(err.message || 'Deep scan failed.');
     } finally {
-      setIsDeepScanning(false);
+      setIsSurfaceDeepScanning(false);
     }
   };
 
-  const dataLayerEvents = Array.from(new Set((deepScan?.dataLayer || []).flatMap((entry: any) => {
-    if (typeof entry?.event === 'string') return [entry.event];
-    if (Array.isArray(entry) && entry[0] === 'event' && typeof entry[1] === 'string') return [entry[1]];
-    return [];
-  })));
-  const ecommerceFields = Array.from(new Set((deepScan?.dataLayer || []).flatMap((entry: any) => {
-    const ecommerce = entry?.ecommerce;
-    return ecommerce && typeof ecommerce === 'object' ? Object.keys(ecommerce) : [];
-  })));
+  const handleAuditDeepScan = async () => {
+    if (!storeUrl) return;
+    setIsAuditDeepScanning(true);
+    setAuditDeepScanError(null);
+    try {
+      setAuditDeepScan(await fetchDeepScan(storeUrl));
+    } catch (err: any) {
+      setAuditDeepScanError(err.message || 'Deep scan failed.');
+    } finally {
+      setIsAuditDeepScanning(false);
+    }
+  };
+
+  // Guards against stale cross-store evidence: a deep scan is only valid
+  // for the exact URL it was run against. Without this, switching tabs (or
+  // editing the URL field after scanning) would silently let one store's
+  // network evidence get attributed to a different store's evidence/audit.
+  const validSurfaceDeepScan = useMemo(
+    () => (surfaceDeepScan && isSameStoreUrl(surfaceDeepScan.url, surfaceUrl) ? surfaceDeepScan : null),
+    [surfaceDeepScan, surfaceUrl]
+  );
+  const validAuditDeepScan = useMemo(
+    () => (auditDeepScan && isSameStoreUrl(auditDeepScan.url, storeUrl) ? auditDeepScan : null),
+    [auditDeepScan, storeUrl]
+  );
+  const surfaceDeepScanStale = !!surfaceDeepScan && !validSurfaceDeepScan;
+  const auditDeepScanStale = !!auditDeepScan && !validAuditDeepScan;
+
+  const extractDataLayerEvents = (deep: DeepScanResult | null) =>
+    Array.from(new Set((deep?.dataLayer || []).flatMap((entry: any) => {
+      if (typeof entry?.event === 'string') return [entry.event];
+      if (Array.isArray(entry) && entry[0] === 'event' && typeof entry[1] === 'string') return [entry[1]];
+      return [];
+    })));
+  const extractEcommerceFields = (deep: DeepScanResult | null) =>
+    Array.from(new Set((deep?.dataLayer || []).flatMap((entry: any) => {
+      const ecommerce = entry?.ecommerce;
+      return ecommerce && typeof ecommerce === 'object' ? Object.keys(ecommerce) : [];
+    })));
+
+  // Tab 1's own evidence panel reads eventEvidence directly instead — this
+  // pair is only needed for Tab 2's "dataLayer evidence" grid.
+  const auditDataLayerEvents = extractDataLayerEvents(validAuditDeepScan);
+  const auditEcommerceFields = extractEcommerceFields(validAuditDeepScan);
 
   // AUDIT -> LOCATE -> POINT -> GUIDE: rank root-cause candidates from
   // whatever real evidence exists so far (surface-only, or surface+deep).
   const diagnosticReport = useMemo(() => {
     if (!surfaceResult || surfaceResult.status !== 'ok') return null;
-    return runDiagnostics(surfaceResult, deepScan);
-  }, [surfaceResult, deepScan]);
+    return runDiagnostics(surfaceResult, validSurfaceDeepScan);
+  }, [surfaceResult, validSurfaceDeepScan]);
 
   // Cards must reflect the strongest evidence available, not just the
   // static HTML pass — confirmed on a real store during testing that static
@@ -160,16 +201,16 @@ export default function App() {
   // either scan updates, regardless of which the operator ran first.
   const enrichedCards = useMemo(() => {
     if (!surfaceResult || surfaceResult.status !== 'ok') return [];
-    const effective = resolveEffectiveSignals(surfaceResult, deepScan);
+    const effective = resolveEffectiveSignals(surfaceResult, validSurfaceDeepScan);
     return buildSurfaceCards(effective, surfaceResult.hasCmp, surfaceResult.cmpName, region);
-  }, [surfaceResult, deepScan, region]);
+  }, [surfaceResult, validSurfaceDeepScan, region]);
 
   // "GA4 connected" != "GA4 implementation is correct" — reconcile what the
   // live API actually reports against what was observed on the storefront.
   const apiReconciliation = useMemo(() => {
     if (!scanResult || scanResult.status === 'error') return [];
-    return reconcileLiveApiEvidence(scanResult, liveGa4, liveGtmMatch, deepScan, region);
-  }, [scanResult, liveGa4, liveGtmMatch, deepScan, region]);
+    return reconcileLiveApiEvidence(scanResult, liveGa4, liveGtmMatch, validAuditDeepScan, region);
+  }, [scanResult, liveGa4, liveGtmMatch, validAuditDeepScan, region]);
 
   // Finish the audit in one sitting: a guided check marked "fail" becomes a
   // real, top-ranked issue in the same report immediately — not a separate
@@ -289,7 +330,7 @@ export default function App() {
         gtmIdInput.trim() || null,
         ga4IdInput.trim() || null,
         region,
-        deepScan
+        validAuditDeepScan
       );
       setScanResult(result);
       if (result.status === 'error') {
@@ -451,11 +492,11 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleDeepScan(surfaceUrl)}
-                      disabled={isDeepScanning || !surfaceUrl}
+                      onClick={() => handleSurfaceDeepScan()}
+                      disabled={isSurfaceDeepScanning || !surfaceUrl}
                       style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #334155', padding: '0 16px', borderRadius: '8px', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer' }}
                     >
-                      {isDeepScanning ? 'Running read-only inspection...' : '🔍 Read-only Deep Scan'}
+                      {isSurfaceDeepScanning ? 'Running read-only inspection...' : '🔍 Read-only Deep Scan'}
                     </button>
                   </form>
 
@@ -464,8 +505,8 @@ export default function App() {
                       ❌ {surfaceError}
                     </div>
                   )}
-                  {deepScanError && (
-                    <div style={{ marginBottom: '12px', color: '#fca5a5', fontSize: '0.8rem' }}>❌ {deepScanError}</div>
+                  {surfaceDeepScanError && (
+                    <div style={{ marginBottom: '12px', color: '#fca5a5', fontSize: '0.8rem' }}>❌ {surfaceDeepScanError}</div>
                   )}
 
                   {surfaceResult && surfaceResult.status === 'ok' && (
@@ -497,7 +538,7 @@ export default function App() {
                                     <div style={{ fontWeight: 700, color: severityColor[f.severity] }}>{severityLabel[f.severity]} · {f.title}</div>
                                     <div style={{ color: '#cbd5e1', marginTop: '4px' }}><strong>Dependency:</strong> {f.dependency}</div>
                                     {f.downstreamConsequences.length > 0 && <div style={{ color: '#94a3b8', marginTop: '4px' }}><strong>If left unfixed:</strong> {f.downstreamConsequences.join(' ')}</div>}
-                                    <div style={{ color: '#64748b', marginTop: '4px' }}>Confidence: {f.confidence}{f.requiresDeepScan && !deepScan ? ' — run deep scan for stronger evidence' : ''}</div>
+                                    <div style={{ color: '#64748b', marginTop: '4px' }}>Confidence: {f.confidence}{f.requiresDeepScan && !validSurfaceDeepScan ? ' — run deep scan for stronger evidence' : ''}</div>
                                   </div>
                                 ))}
                               </div>
@@ -516,19 +557,22 @@ export default function App() {
                         ))}
                       </div>
 
-                      {deepScan && (
+                      {surfaceDeepScanStale && (
+                        <div style={{ color: '#fbbf24', fontSize: '0.75rem', marginTop: '1.25rem' }}>⚠ Deep scan evidence was for a different URL — re-run "Read-only Deep Scan" for this one.</div>
+                      )}
+                      {validSurfaceDeepScan && (
                         <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '12px', border: '1px solid #334155', marginTop: '1.25rem' }}>
                           <div style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '10px' }}>Deep Scan (Headless Browser)</div>
                           <div style={{ fontSize: '0.8rem', color: '#cbd5e1', marginBottom: '6px' }}>
-                            dataLayer present: <span style={{ color: deepScan.dataLayerPresent ? '#4ade80' : '#fbbf24' }}>{deepScan.dataLayerPresent ? 'Yes' : 'No'}</span>
+                            dataLayer present: <span style={{ color: validSurfaceDeepScan.dataLayerPresent ? '#4ade80' : '#fbbf24' }}>{validSurfaceDeepScan.dataLayerPresent ? 'Yes' : 'No'}</span>
                           </div>
                           <div style={{ fontSize: '0.8rem', color: '#cbd5e1', marginBottom: '6px' }}>
-                            Consent signal found: <span style={{ color: deepScan.consent.found ? '#4ade80' : '#fbbf24' }}>{deepScan.consent.found ? 'Yes' : 'No'}</span>
+                            Consent signal found: <span style={{ color: validSurfaceDeepScan.consent.found ? '#4ade80' : '#fbbf24' }}>{validSurfaceDeepScan.consent.found ? 'Yes' : 'No'}</span>
                           </div>
                           <div style={{ fontSize: '0.8rem', color: '#cbd5e1', marginBottom: '6px' }}>
-                            Page-load events observed: {deepScan.eventEvidence.length ? deepScan.eventEvidence.map((item) => item.event).join(', ') : 'None readable'}
+                            Page-load events observed: {validSurfaceDeepScan.eventEvidence.length ? validSurfaceDeepScan.eventEvidence.map((item) => item.event).join(', ') : 'None readable'}
                           </div>
-                          <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '8px' }}>{deepScan.note}</div>
+                          <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '8px' }}>{validSurfaceDeepScan.note}</div>
                         </div>
                       )}
                     </>
@@ -646,7 +690,7 @@ export default function App() {
                       <button onClick={() => window.open('/api/gtm/auth', '_blank')} style={{ background: '#1e293b', color: '#fff', border: '1px solid #475569', borderRadius: '7px', padding: '7px 10px' }}>{accessStatus.gtm.connected ? 'GTM connected' : 'Connect GTM'}</button>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
-                      {Object.entries({ shopify: accessStatus.shopify.configured ? 'ready' : 'not-configured', ga4: accessStatus.ga4.connected ? 'connected' : 'not-configured', gtm: accessStatus.gtm.connected ? 'connected' : 'not-configured', dataLayer: deepScan?.dataLayerPresent ? 'ready' : 'waiting', consent: deepScan?.consent.found ? 'ready' : 'waiting' }).map(([key, value]) => (
+                      {Object.entries({ shopify: accessStatus.shopify.configured ? 'ready' : 'not-configured', ga4: accessStatus.ga4.connected ? 'connected' : 'not-configured', gtm: accessStatus.gtm.connected ? 'connected' : 'not-configured', dataLayer: validAuditDeepScan?.dataLayerPresent ? 'ready' : 'waiting', consent: validAuditDeepScan?.consent.found ? 'ready' : 'waiting' }).map(([key, value]) => (
                         <div key={key} style={{ backgroundColor: '#0f172a', borderRadius: '8px', padding: '10px', border: '1px solid #334155' }}>
                           <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase' }}>{key}</div>
                           <div style={{ marginTop: '6px', fontSize: '0.78rem', color: value === 'waiting' || value === 'not-configured' ? '#fbbf24' : '#4ade80' }}>{getAdapterStateLabel(value as any)}</div>
@@ -658,14 +702,18 @@ export default function App() {
                   <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '12px', border: '1px solid #334155', marginBottom: '1rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
                       <div><div style={{ fontSize: '0.9rem', fontWeight: 700 }}>dataLayer evidence</div><div style={{ color: '#94a3b8', fontSize: '0.75rem', marginTop: '4px' }}>Read-only browser evidence; it does not validate checkout purchase firing.</div></div>
-                      <button onClick={() => handleDeepScan(storeUrl)} disabled={isDeepScanning || !storeUrl} style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #475569', padding: '9px 13px', borderRadius: '8px', cursor: 'pointer' }}>{isDeepScanning ? 'Inspecting...' : 'Inspect dataLayer'}</button>
+                      <button onClick={() => handleAuditDeepScan()} disabled={isAuditDeepScanning || !storeUrl} style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #475569', padding: '9px 13px', borderRadius: '8px', cursor: 'pointer' }}>{isAuditDeepScanning ? 'Inspecting...' : 'Inspect dataLayer'}</button>
                     </div>
-                    {deepScan && (
+                    {auditDeepScanError && <div style={{ color: '#fca5a5', fontSize: '0.78rem', marginTop: '8px' }}>❌ {auditDeepScanError}</div>}
+                    {auditDeepScanStale && (
+                      <div style={{ color: '#fbbf24', fontSize: '0.75rem', marginTop: '8px' }}>⚠ dataLayer evidence was for a different URL — re-run "Inspect dataLayer" for this one before auditing.</div>
+                    )}
+                    {validAuditDeepScan && (
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px', marginTop: '12px', fontSize: '0.8rem' }}>
-                        <div><span style={{ color: '#94a3b8' }}>dataLayer</span><div style={{ color: deepScan.dataLayerPresent ? '#4ade80' : '#fbbf24', marginTop: '4px' }}>{deepScan.dataLayerPresent ? 'Detected' : 'Not detected'}</div></div>
-                        <div><span style={{ color: '#94a3b8' }}>Events</span><div style={{ marginTop: '4px' }}>{dataLayerEvents.length ? dataLayerEvents.join(', ') : 'None readable'}</div></div>
-                        <div><span style={{ color: '#94a3b8' }}>Ecommerce fields</span><div style={{ marginTop: '4px' }}>{ecommerceFields.length ? ecommerceFields.join(', ') : 'None readable'}</div></div>
-                        <div><span style={{ color: '#94a3b8' }}>Consent / server-side heuristic</span><div style={{ marginTop: '4px' }}>{deepScan.consent.found ? 'Consent signal detected' : 'Consent unconfirmed'} · {deepScan.trackingSignals.serverSideEndpointCandidates.length ? 'Possible server endpoint (heuristic)' : 'No server endpoint observed'}</div></div>
+                        <div><span style={{ color: '#94a3b8' }}>dataLayer</span><div style={{ color: validAuditDeepScan.dataLayerPresent ? '#4ade80' : '#fbbf24', marginTop: '4px' }}>{validAuditDeepScan.dataLayerPresent ? 'Detected' : 'Not detected'}</div></div>
+                        <div><span style={{ color: '#94a3b8' }}>Events</span><div style={{ marginTop: '4px' }}>{auditDataLayerEvents.length ? auditDataLayerEvents.join(', ') : 'None readable'}</div></div>
+                        <div><span style={{ color: '#94a3b8' }}>Ecommerce fields</span><div style={{ marginTop: '4px' }}>{auditEcommerceFields.length ? auditEcommerceFields.join(', ') : 'None readable'}</div></div>
+                        <div><span style={{ color: '#94a3b8' }}>Consent / server-side heuristic</span><div style={{ marginTop: '4px' }}>{validAuditDeepScan.consent.found ? 'Consent signal detected' : 'Consent unconfirmed'} · {validAuditDeepScan.trackingSignals.serverSideEndpointCandidates.length ? 'Possible server endpoint (heuristic)' : 'No server endpoint observed'}</div></div>
                       </div>
                     )}
                   </div>
