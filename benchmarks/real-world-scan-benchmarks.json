@@ -1,0 +1,577 @@
+{
+  "_purpose": "Reference dataset of real, currently-active store scans, bifurcated by stage because each stage has a different function and only ever produces a subset of this data in the real app. Not a test fixture consumed by test runners — a running accuracy log for manually or programmatically comparing future scans of the same URLs against what was observed here, to catch drift or regressions in the diagnostic engine. Update by appending new entries with a fresh scannedAt, never overwrite history.",
+  "stage1_url_scan": {
+    "_function_and_intention": "Stage 1 (No Access) is a URL-only, region-blind ice-breaker. It runs static HTML detection ONLY — no deep scan (removed 2026-08-15), no Locate+Point+Guide diagnostics (moved to Stage 2 only, same date). Its entire output is the 8 business-metric card grid: missingSignalCount drives the ROAS/CAC possibility text and the urgency line; the other 6 metrics are always honestly locked regardless of what's found, since a URL scan can never see financial/order data. The benchmark value that matters here is missingSignalCount (0-4) computed from static evidence alone.",
+    "records": [
+      {
+        "url": "https://magicspoon.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "staticTags": [],
+        "missingSignalCount": 4
+      },
+      {
+        "url": "https://drsquatch.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM",
+          "GA4"
+        ],
+        "missingSignalCount": 2
+      },
+      {
+        "url": "https://liquiddeath.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GA4"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://mejuri.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://pelacase.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM",
+          "GA4"
+        ],
+        "missingSignalCount": 2
+      },
+      {
+        "url": "https://knix.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "staticTags": [],
+        "missingSignalCount": 4
+      },
+      {
+        "url": "https://frankandoak.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GA4"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://kotn.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GA4"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://article.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://princesspolly.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GA4"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://frankbody.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "staticTags": [],
+        "missingSignalCount": 4
+      },
+      {
+        "url": "https://sandandsky.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM",
+          "GA4"
+        ],
+        "missingSignalCount": 2
+      },
+      {
+        "url": "https://bondisands.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GA4"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://nudebynature.com.au",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM",
+          "GA4"
+        ],
+        "missingSignalCount": 2
+      },
+      {
+        "url": "https://sukinnaturals.com.au",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM",
+          "GA4",
+          "TikTok"
+        ],
+        "missingSignalCount": 1
+      },
+      {
+        "url": "https://skinnydiplondon.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM",
+          "GA4"
+        ],
+        "missingSignalCount": 2
+      },
+      {
+        "url": "https://lazyoaf.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://byoma.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GA4"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://pipandnut.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GA4"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://huel.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://strathberry.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM"
+        ],
+        "missingSignalCount": 3
+      },
+      {
+        "url": "https://charlottetilbury.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [],
+        "missingSignalCount": 4
+      },
+      {
+        "url": "https://gymshark.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "staticTags": [],
+        "missingSignalCount": 4
+      },
+      {
+        "url": "https://allbirds.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "staticTags": [
+          "GTM"
+        ],
+        "missingSignalCount": 3
+      }
+    ]
+  },
+  "stage2_full_audit": {
+    "_function_and_intention": "Stage 2 (With Access) is the real diagnostic — static HTML + deep-scan network capture combined, run through runDiagnostics() to produce Locate+Point+Guide findings. The benchmark value that matters here is earliestFailure (and the full findings list) since that's what actually drives the Top Issues / Edge Cases the operator sees. This is also where the R2/R6 static-only-evidence bug (found and fixed 2026-08-15 via magicspoon.com) would resurface first if it ever regressed.",
+    "records": [
+      {
+        "url": "https://magicspoon.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://drsquatch.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://liquiddeath.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "deepFires": [],
+        "earliestFailure": "ga4-declared-not-observed",
+        "severity": "medium",
+        "allFindings": [
+          "ga4-declared-not-observed"
+        ]
+      },
+      {
+        "url": "https://mejuri.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "none",
+        "severity": null,
+        "allFindings": [
+          "no-blocking-dependency-issue"
+        ]
+      },
+      {
+        "url": "https://pelacase.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://knix.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GA4",
+          "TikTok"
+        ],
+        "earliestFailure": "none",
+        "severity": null,
+        "allFindings": [
+          "no-blocking-dependency-issue"
+        ]
+      },
+      {
+        "url": "https://frankandoak.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GA4",
+          "Meta"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://kotn.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "none",
+        "severity": null,
+        "allFindings": [
+          "no-blocking-dependency-issue"
+        ]
+      },
+      {
+        "url": "https://article.com",
+        "region": "CA",
+        "scannedAt": "2026-08-15",
+        "deepFires": [],
+        "earliestFailure": "gtm-declared-not-observed",
+        "severity": "medium",
+        "allFindings": [
+          "gtm-declared-not-observed",
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://princesspolly.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "ga4-id-mismatch",
+        "severity": "high",
+        "allFindings": [
+          "ga4-id-mismatch"
+        ],
+        "note": "Real, subtle catch — the declared GA4 ID doesn't match what's actually firing on a $200M live brand."
+      },
+      {
+        "url": "https://frankbody.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://sandandsky.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "duplicate-gtm-containers",
+        "severity": "high",
+        "allFindings": [
+          "duplicate-gtm-containers"
+        ]
+      },
+      {
+        "url": "https://bondisands.com",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GA4",
+          "TikTok"
+        ],
+        "earliestFailure": "none",
+        "severity": null,
+        "allFindings": [
+          "no-blocking-dependency-issue"
+        ]
+      },
+      {
+        "url": "https://nudebynature.com.au",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "duplicate-gtm-containers",
+        "severity": "high",
+        "allFindings": [
+          "duplicate-gtm-containers"
+        ]
+      },
+      {
+        "url": "https://sukinnaturals.com.au",
+        "region": "AU",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://skinnydiplondon.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "none",
+        "severity": null,
+        "allFindings": [
+          "no-blocking-dependency-issue"
+        ]
+      },
+      {
+        "url": "https://lazyoaf.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://byoma.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [],
+        "earliestFailure": "tags-without-datalayer",
+        "severity": "high",
+        "allFindings": [
+          "tags-without-datalayer"
+        ],
+        "note": "GA4 declared in static HTML but the deep scan saw zero network activity at all — worth a human sanity check, could be consent-gated."
+      },
+      {
+        "url": "https://pipandnut.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://huel.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM"
+        ],
+        "earliestFailure": "none",
+        "severity": null,
+        "allFindings": [
+          "no-blocking-dependency-issue"
+        ]
+      },
+      {
+        "url": "https://strathberry.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GA4"
+        ],
+        "earliestFailure": "gtm-declared-not-observed",
+        "severity": "medium",
+        "allFindings": [
+          "gtm-declared-not-observed"
+        ]
+      },
+      {
+        "url": "https://charlottetilbury.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [],
+        "earliestFailure": "no-measurement-layer",
+        "severity": "critical",
+        "allFindings": [
+          "no-measurement-layer"
+        ],
+        "note": "Nothing detected at all, static or deep, on a major global cosmetics brand — flagged for a human look rather than assumed correct. Could be consent-gated (this scan never clicks accept) or a genuine gap."
+      },
+      {
+        "url": "https://gymshark.com",
+        "region": "UK",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta",
+          "TikTok"
+        ],
+        "earliestFailure": "no-cmp-with-active-tags",
+        "severity": "medium",
+        "allFindings": [
+          "no-cmp-with-active-tags"
+        ]
+      },
+      {
+        "url": "https://allbirds.com",
+        "region": "US",
+        "scannedAt": "2026-08-15",
+        "deepFires": [
+          "GTM",
+          "GA4",
+          "Meta"
+        ],
+        "earliestFailure": "duplicate-gtm-containers",
+        "severity": "high",
+        "allFindings": [
+          "duplicate-gtm-containers"
+        ]
+      }
+    ]
+  }
+}

@@ -20,6 +20,14 @@ function baseSurface(overrides: Partial<SurfaceAuditResult> = {}): SurfaceAuditR
     missingSignalCount: 4,
     blindSpotPct: 100,
     cards: [],
+    hasLegacyUa: false,
+    legacyUaId: null,
+    hasPinterestTag: false,
+    pinterestTagId: null,
+    hasSnapchatPixel: false,
+    snapchatPixelId: null,
+    hasMicrosoftUet: false,
+    contactSignals: { socialLinks: [], contactEmail: null, aboutOrContactPageUrl: null },
     ...overrides,
   };
 }
@@ -32,7 +40,7 @@ function baseDeep(overrides: Partial<DeepScanResult> = {}): DeepScanResult {
     consent: { found: false, raw: null },
     trackingRequestsSeen: [],
     eventEvidence: [],
-    trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, serverSideEndpointCandidates: [] },
+    trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] },
     observedIds: { ga4: [], gtm: [] },
     note: '',
     ...overrides,
@@ -51,11 +59,24 @@ test('no tags anywhere, deep scan NOT run yet -> a hedged, lower-severity "incom
 });
 
 test('no tags anywhere, deep scan run AND also confirms nothing -> genuinely critical, this is the only case that earns it', () => {
-  const deep = baseDeep({ trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, serverSideEndpointCandidates: [] } });
+  const deep = baseDeep({ trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] } });
   const report = runDiagnostics(baseSurface(), deep);
   assert.equal(report.earliestFailure?.id, 'no-measurement-layer');
   assert.equal(report.earliestFailure?.severity, 'critical');
   assert.equal(report.earliestFailure?.confidence, 'high');
+});
+
+test('"nothing detected" lists multiple possible causes to check, including the Shopify Custom Pixels sandbox blind spot — never picks just one', () => {
+  const deep = baseDeep({ trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] } });
+  const report = runDiagnostics(baseSurface(), deep);
+  const reasons = report.earliestFailure?.possibleReasons;
+  assert.ok(reasons && reasons.length >= 3, 'expected multiple candidate causes, not a single guess');
+  assert.ok(reasons!.some((r) => /consent/i.test(r.cause)));
+  assert.ok(reasons!.some((r) => /Custom Pixels/i.test(r.cause) && /sandbox/i.test(r.cause)));
+  // every cause pairs with its own concrete action — Locate+Point isn't enough without a Guide per cause
+  for (const r of reasons!) {
+    assert.ok(r.howToCheck.length > 10, `cause "${r.cause}" is missing a concrete howToCheck`);
+  }
 });
 
 test('GTM/GA4 present but no dataLayer -> tags-without-datalayer beats a lower-severity finding', () => {
@@ -64,6 +85,22 @@ test('GTM/GA4 present but no dataLayer -> tags-without-datalayer beats a lower-s
   const report = runDiagnostics(surface, deep);
   assert.ok(report.findings.some((f) => f.id === 'tags-without-datalayer'));
   assert.equal(report.earliestFailure?.id, 'tags-without-datalayer');
+  const finding = report.findings.find((f) => f.id === 'tags-without-datalayer')!;
+  assert.ok(finding.possibleReasons!.length >= 3);
+  assert.ok(finding.possibleReasons!.some((r) => /app/i.test(r.cause))); // app-injected dataLayer is guided externally, not diagnosed
+  assert.ok(finding.possibleReasons!.some((r) => /sandbox/i.test(r.cause)));
+});
+
+test('GTM declared but not observed firing -> possible reasons include timing, consent, and unpublished container, each with its own check', () => {
+  const surface = baseSurface({ gtmId: 'GTM-ABC1234', gtmIdsAll: ['GTM-ABC1234'] });
+  const deep = baseDeep();
+  const report = runDiagnostics(surface, deep);
+  const finding = report.findings.find((f) => f.id === 'gtm-declared-not-observed')!;
+  assert.ok(finding, 'expected gtm-declared-not-observed to fire');
+  assert.equal(finding.possibleReasons!.length, 3);
+  for (const r of finding.possibleReasons!) {
+    assert.ok(r.howToCheck.length > 10);
+  }
 });
 
 test('duplicate GTM containers is measured, not inferred, and ranks as high', () => {
@@ -89,11 +126,28 @@ test('a second GTM container only visible via deep-scan network requests (not st
 
 test('GA4 ID in HTML does not match what is actually firing -> measured mismatch finding', () => {
   const surface = baseSurface({ ga4Id: 'G-DECLARED01' });
-  const deep = baseDeep({ trackingSignals: { ga4Requests: 1, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, serverSideEndpointCandidates: [] }, observedIds: { ga4: ['G-DIFFERENT2'], gtm: [] } });
+  const deep = baseDeep({ trackingSignals: { ga4Requests: 1, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] }, observedIds: { ga4: ['G-DIFFERENT2'], gtm: [] } });
   const report = runDiagnostics(surface, deep);
   const mismatch = report.findings.find((f) => f.id === 'ga4-id-mismatch');
   assert.ok(mismatch, 'expected a mismatch finding when declared and observed GA4 IDs differ');
   assert.equal(mismatch?.confidence, 'measured');
+});
+
+test('a legacy Universal Analytics snippet is flagged as clutter, not a tracking failure — info severity, never blocks', () => {
+  const surface = baseSurface({ gtmId: 'GTM-X', gtmIdsAll: ['GTM-X'], ga4Id: 'G-Y', hasCmp: true, cmpName: 'OneTrust', hasLegacyUa: true, legacyUaId: 'UA-12345678-1' });
+  const report = runDiagnostics(surface, null);
+  const uaFinding = report.findings.find((f) => f.id === 'legacy-ua-present');
+  assert.ok(uaFinding, 'expected a legacy-ua-present finding when hasLegacyUa is true');
+  assert.equal(uaFinding?.severity, 'info');
+  assert.match(uaFinding!.observed.join(' '), /UA-12345678-1/);
+  assert.match(uaFinding!.doesNotProve, /July 2023/);
+  assert.notEqual(report.earliestFailure?.id, 'legacy-ua-present'); // info-level, never the "point to first"
+});
+
+test('no legacy UA snippet present produces no such finding', () => {
+  const surface = baseSurface({ gtmId: 'GTM-X', gtmIdsAll: ['GTM-X'], hasLegacyUa: false });
+  const report = runDiagnostics(surface, null);
+  assert.equal(report.findings.some((f) => f.id === 'legacy-ua-present'), false);
 });
 
 test('never claims proof beyond page-load evidence — doesNotProve is always populated', () => {
@@ -148,4 +202,63 @@ test('a manually-supplied ID with zero evidence to compare against does not fire
   const report = runDiagnostics(surface, null, { gtmId: 'GTM-ANYTHING' });
   assert.equal(report.findings.some((f) => f.id === 'manual-gtm-mismatch'), false);
   assert.equal(report.earliestFailure?.id, 'static-scan-only-inconclusive');
+});
+
+// Stage 1 (URL-only, no access) must never inject region-based "knowledge" —
+// calling runDiagnostics without a region (its default) has to produce the
+// same generic compliance language regardless of what region would apply.
+test('no-cmp-with-active-tags stays region-blind by default — Stage 1 never names a specific privacy law', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false });
+  const report = runDiagnostics(surface, null);
+  const finding = report.findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  assert.ok(finding, 'expected the finding to fire');
+  assert.doesNotMatch(finding.dependency, /GDPR|CCPA|CPRA|PIPEDA|DPDP|Privacy Act/);
+  assert.match(finding.dependency, /Most privacy rules require consent/);
+});
+
+// Stage 2 (with access) passes the confirmed region, and only there should
+// the finding name the actual applicable law — same observation, sharper
+// language, since Stage 2 has a real region to ground it in.
+test('no-cmp-with-active-tags names the actual privacy law once a confirmed region is passed in (Stage 2 only)', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false });
+  const inReport = runDiagnostics(surface, null, null, 'IN');
+  const usReport = runDiagnostics(surface, null, null, 'US');
+  const inFinding = inReport.findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  const usFinding = usReport.findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  assert.match(inFinding.dependency, /DPDP/);
+  assert.match(usFinding.dependency, /CCPA\/CPRA/);
+  assert.notEqual(inFinding.dependency, usFinding.dependency);
+});
+
+// Real gap found live (2026-08-15) scanning magicspoon.com: every tag
+// loaded dynamically (nothing in static HTML), deep scan confirmed
+// GTM/GA4/Meta/TikTok all firing, no CMP detected — but no-cmp-with-active-
+// tags never fired because it only ever checked static evidence for "is
+// anything active." Fixed to also count deep-scan-observed requests.
+test('no-cmp-with-active-tags fires from deep-scan-observed activity alone — a store with zero static tags but real firing tags is not exempt', () => {
+  const surface = baseSurface({ hasCmp: false }); // nothing in static HTML at all
+  const deep = baseDeep({ trackingSignals: { ...baseDeep().trackingSignals, ga4Requests: 3, gtmRequests: 1 } });
+  const report = runDiagnostics(surface, deep);
+  const finding = report.findings.find((f) => f.id === 'no-cmp-with-active-tags');
+  assert.ok(finding, 'expected the finding to fire from deep-scan evidence alone, matching the real magicspoon.com case');
+  assert.equal(finding!.requiresDeepScan, true, 'this specific case only exists because of deep-scan evidence, so it should say so');
+  assert.match(finding!.observed[0], /deep scan/i);
+});
+
+test('no-cmp-with-active-tags still fires normally from static evidence — requiresDeepScan stays false there, unchanged from before', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false });
+  const report = runDiagnostics(surface, null);
+  const finding = report.findings.find((f) => f.id === 'no-cmp-with-active-tags');
+  assert.ok(finding);
+  assert.equal(finding!.requiresDeepScan, false);
+});
+
+// Same class of gap, same fix pattern, checked on the sibling rule.
+test('tags-without-datalayer fires from deep-scan-observed activity alone, not just a statically-declared ID', () => {
+  const surface = baseSurface(); // no gtmId/ga4Id in static HTML
+  const deep = baseDeep({ dataLayerPresent: false, trackingSignals: { ...baseDeep().trackingSignals, ga4Requests: 2 } });
+  const report = runDiagnostics(surface, deep);
+  const finding = report.findings.find((f) => f.id === 'tags-without-datalayer');
+  assert.ok(finding, 'expected the finding to fire — tags are confirmed firing via deep scan even with nothing in static HTML');
+  assert.match(finding!.observed[0], /deep scan/i);
 });

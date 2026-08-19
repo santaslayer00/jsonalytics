@@ -14,6 +14,8 @@
  */
 
 import type { SurfaceAuditResult, DeepScanResult } from './auditLogic';
+import type { Region } from './constants.ts';
+import { REGIONS } from './constants.ts';
 
 export type DiagnosticSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type DiagnosticConfidence = 'measured' | 'high' | 'medium' | 'low';
@@ -35,6 +37,18 @@ export interface DiagnosticFinding {
   downstreamConsequences: string[];
   /** The concrete first thing the operator should check. */
   firstCheck: string;
+  /**
+   * When a symptom can genuinely come from more than one distinct cause
+   * that this scan can't tell apart (e.g. "nothing detected" could mean
+   * not installed, blocked by consent, or running in an isolated sandbox
+   * this scan can't see into — Shopify Custom Pixels, for one), list them
+   * here instead of guessing which one it is. Each cause pairs with its
+   * own concrete check — Locate+Point without a matching Guide per cause
+   * just leaves the operator staring at a list of possibilities with no
+   * next action. Finding which one is actually true is still manual work
+   * by design; the app points at the possibilities AND how to test each.
+   */
+  possibleReasons?: Array<{ cause: string; howToCheck: string }>;
   requiresDeepScan: boolean;
 }
 
@@ -60,7 +74,13 @@ export interface ManualIds {
 export function runDiagnostics(
   surface: SurfaceAuditResult,
   deep: DeepScanResult | null,
-  manual: ManualIds | null = null
+  manual: ManualIds | null = null,
+  // Optional on purpose — Stage 1 (URL-only, no access) calls this without a
+  // region so its output stays region-blind, per the "no injected knowledge
+  // on Stage 1" rule. Stage 2 (with access) passes the confirmed region so
+  // findings like no-cmp-with-active-tags can name the actual privacy law
+  // that applies, instead of the generic placeholder line below.
+  region: Region | null = null
 ): DiagnosticReport {
   const findings: DiagnosticFinding[] = [];
   const hasDeep = !!deep;
@@ -81,20 +101,34 @@ export function runDiagnostics(
       id: 'no-measurement-layer',
       severity: 'critical',
       confidence: 'high',
-      title: 'No measurement layer detected on page load',
+      title: 'No tracking found on page load',
       observed: [
-        'No GTM container ID, GA4 measurement ID, Meta Pixel, or TikTok Pixel signature found in the page HTML.',
-        'No matching tracking network requests observed during the read-only page-load scan.',
+        'No GTM, GA4, Meta Pixel, or TikTok Pixel code found in the page.',
+        'No matching tracking requests seen during the scan.',
       ],
-      proves: 'The homepage, as loaded by an unauthenticated visitor, ships no detectable tracking code — confirmed by both the static HTML pass and the deep scan\'s network-request evidence.',
-      doesNotProve: 'This does not prove tracking is absent store-wide — it could be gated behind consent, loaded only on other templates, or blocked by bot protection during this scan.',
-      dependency: 'Every downstream metric (attribution, ROAS measurement, retargeting audiences, GA4 reporting) depends on a measurement layer existing first. This is the earliest possible failure — there is nothing upstream of it.',
+      proves: 'Your homepage sends no detectable tracking code to a visitor — checked two ways: the page source, and the live network requests.',
+      doesNotProve: 'This doesn\'t mean tracking is missing everywhere — it could be hidden behind a cookie-consent popup, only added to other pages, or blocked by bot protection during this scan.',
+      dependency: 'Everything downstream — attribution, ad performance, GA4 reporting — needs a working tracking layer first. This is the earliest possible failure; nothing comes before it.',
       downstreamConsequences: [
-        'Ad platforms cannot build retargeting audiences.',
-        'No GA4/GTM data exists to reconcile against Shopify revenue.',
-        'Any financial audit (Tab 2) will have no tracking signal to validate against.',
+        'Ad platforms can\'t build retargeting audiences.',
+        'No GA4/GTM data exists to compare against Shopify revenue.',
+        'The financial audit (Tab 2) has no tracking signal to check.',
       ],
-      firstCheck: 'Confirm in Shopify Admin whether a GTM container or GA4 tag is configured at all (Online Store > Preferences, or Custom Pixels). If one is configured, re-scan — it may be blocked by this run or gated behind consent-on-load.',
+      firstCheck: 'Check each possible reason below, in order — this scan can\'t tell which one it is.',
+      possibleReasons: [
+        {
+          cause: 'Not actually installed.',
+          howToCheck: 'Check Shopify Admin\'s Custom Pixels section for a saved GTM or GA4 entry. Search: "Shopify Admin custom pixels" if the menu has moved since this was written.',
+        },
+        {
+          cause: 'Installed but blocked by cookie consent — won\'t fire until a visitor opts in.',
+          howToCheck: 'Load the page yourself, accept the consent banner, then re-scan. If tracking now appears, consent gating was the cause.',
+        },
+        {
+          cause: 'Installed via Shopify\'s Custom Pixels — these run in an isolated sandboxed worker this scan structurally cannot see into (confirmed against Shopify\'s own docs: sandboxed pixel requests "won\'t be directly visible in standard page source inspection methods"). Zero evidence here does not mean zero activity if this is the setup.',
+          howToCheck: 'Open GTM Preview mode (or your sGTM container\'s own debug/preview tool) directly — it reads from your tag manager account, not the page, so it can see past the sandbox this scan can\'t. That said, Preview isn\'t a guarantee of live behavior: some things fire in Preview but not once published (or the reverse), so treat this as a strong signal, not final proof — the real test is checking again after publishing.',
+        },
+      ],
       requiresDeepScan: false,
     });
   }
@@ -113,16 +147,26 @@ export function runDiagnostics(
       id: 'static-scan-only-inconclusive',
       severity: 'medium',
       confidence: 'low',
-      title: 'Static HTML shows no tracking signatures — deep scan not yet run',
+      title: 'Nothing found yet — deep scan hasn\'t run',
       observed: [
-        'No GTM container ID, GA4 measurement ID, Meta Pixel, or TikTok Pixel signature found in the page HTML.',
-        'The deep scan (real network requests, dataLayer, consent signals) has not been run yet.',
+        'No GTM, GA4, Meta Pixel, or TikTok Pixel code found in the page source.',
+        'The deep scan (real network requests, dataLayer, consent) hasn\'t run yet.',
       ],
-      proves: 'Only that the raw page source has no tracking signatures on it.',
-      doesNotProve: 'Whether tracking actually exists — this is the weakest evidence tier this app has. A second GTM container chain-loaded by the first, tags gated behind consent, or dynamically-injected pixels routinely show nothing in static HTML while working fine.',
-      dependency: 'The deep scan is a precondition for a meaningful conclusion here, not an optional extra — nothing downstream of this finding should be acted on until it runs.',
+      proves: 'Only that the raw page source has no visible tracking code.',
+      doesNotProve: 'Whether tracking actually exists — this is the weakest evidence this app has. A second GTM container loaded by the first, consent-gated tags, or a pixel added by JavaScript often show nothing in the page source while working fine.',
+      dependency: 'The deep scan needs to run before this means anything — don\'t act on this finding until it does.',
       downstreamConsequences: [],
-      firstCheck: 'Run the read-only deep scan before concluding anything is missing — static HTML alone is not strong enough evidence either way.',
+      firstCheck: 'Run the read-only deep scan before concluding anything is missing.',
+      possibleReasons: [
+        {
+          cause: 'Not installed yet, or installed but blocked by consent.',
+          howToCheck: 'Run the deep scan below — it captures real network requests and will help tell these two apart.',
+        },
+        {
+          cause: 'Installed via Shopify\'s Custom Pixels — sandboxed, and the deep scan has the same blind spot as this static pass. If the deep scan also comes back empty, that still doesn\'t rule this out.',
+          howToCheck: 'Check GTM Preview mode (or your sGTM container\'s own debug/preview tool) directly — it doesn\'t rely on page-source inspection, so it can see past the sandbox. Still only a strong signal, not final proof: Preview can differ from what actually happens once published, so confirm again after publishing.',
+        },
+      ],
       requiresDeepScan: true,
     });
   }
@@ -142,41 +186,73 @@ export function runDiagnostics(
       id: 'duplicate-gtm-containers',
       severity: 'high',
       confidence: 'measured',
-      title: `${allObservedGtmIds.length} distinct GTM containers found`,
+      title: `${allObservedGtmIds.length} GTM containers found on one page`,
       observed: [
         `GTM container IDs found: ${allObservedGtmIds.join(', ')}.`,
         seenOnlyInNetwork
-          ? 'At least one of these only appeared in the deep-scan network requests, not the static page source — it is loaded dynamically (e.g. chain-loaded by the first container), which a static-only scan would miss entirely.'
+          ? 'At least one of these only showed up in real network requests, not the page source — it loads dynamically, which a static-only scan would miss entirely.'
           : 'Source: static page HTML.',
       ],
-      proves: 'More than one GTM container is loading on this page.',
-      doesNotProve: 'This does not by itself prove double-counted conversions — that depends on whether the same tags are configured to fire in both containers.',
-      dependency: 'A single source of truth for tag firing is a precondition for trustworthy GA4/ads numbers. Two containers loading the same tag types is very likely to inflate counts.',
-      downstreamConsequences: ['Pageviews, purchases, or both may be double-counted in GA4 and ad-platform reporting, inflating ROAS and hiding the real CAC.'],
-      firstCheck: 'Open GTM Preview mode for each container ID and check whether the same tags (e.g. GA4 config, Meta base pixel) are active in more than one.',
+      proves: 'More than one GTM container loads on this page.',
+      doesNotProve: 'This alone doesn\'t prove double-counted conversions — that depends on whether the same tags fire in both containers.',
+      dependency: 'Trustworthy GA4/ads numbers need one clear source of truth for tag firing. Two containers loading the same tags is very likely to inflate counts.',
+      downstreamConsequences: ['Pageviews or purchases may be counted twice in GA4 and ad-platform reporting, inflating ROAS and hiding your real cost per acquisition.'],
+      firstCheck: 'Open GTM Preview mode for each container ID and check whether the same tags (e.g. GA4, Meta pixel) are active in more than one.',
       requiresDeepScan: seenOnlyInNetwork,
     });
   }
 
-  // R2 — tags present but no dataLayer (upstream break for ecommerce data)
-  if (hasDeep && deep!.dataLayerPresent === false && (surface.gtmId || surface.ga4Id)) {
+  // R2 — tags present but no dataLayer (upstream break for ecommerce data).
+  // "Present" means either declared in static HTML OR confirmed firing via
+  // deep-scan network requests — a tag that only ever loads dynamically
+  // (never in static HTML, e.g. via Custom Pixels or a tag-management app)
+  // is just as real a "tags present" case as one sitting in the page
+  // source. This mirrors the exact class of gap found live on a real store
+  // (magicspoon.com, 2026-08-15) where every tag loaded dynamically —
+  // that store's dataLayer happened to be present so R2 itself wasn't
+  // wrong there, but R6 below (same static-only gating pattern) missed a
+  // real no-CMP-with-active-tags case. Fixed both while auditing for the
+  // same mistake elsewhere.
+  if (hasDeep && deep!.dataLayerPresent === false && (surface.gtmId || surface.ga4Id || anyObservedRequest)) {
     findings.push({
       id: 'tags-without-datalayer',
       severity: 'high',
       confidence: 'high',
-      title: 'Tracking tags present, but no dataLayer object found',
+      title: 'Tracking code is there, but no dataLayer',
       observed: [
-        surface.gtmId ? `GTM container ${surface.gtmId} present in page HTML.` : `GA4 ID ${surface.ga4Id} present in page HTML.`,
-        'window.dataLayer was not an array (or was absent) during the read-only page-load check.',
+        surface.gtmId
+          ? `GTM container ${surface.gtmId} present in page HTML.`
+          : surface.ga4Id
+            ? `GA4 ID ${surface.ga4Id} present in page HTML.`
+            : 'Tracking requests (GTM/GA4/Meta/TikTok) observed firing during the deep scan — not present in static HTML, so this only shows up with deep-scan evidence.',
+        'window.dataLayer was missing or empty during the scan.',
       ],
-      proves: 'The page loads tag infrastructure, but nothing is confirmed to be pushing structured ecommerce data into a dataLayer for it to consume.',
-      doesNotProve: 'Basic pageview tracking may still work via gtag/GTM defaults — this specifically threatens ecommerce event data (view_item, add_to_cart, purchase), not tag presence itself.',
-      dependency: 'GTM/GA4 ecommerce reporting depends on a populated dataLayer as its input. If the dataLayer is missing, GA4/GTM configuration correctness is irrelevant — there is no data for it to read. This is upstream of any GA4 event-mapping issue.',
+      proves: 'The page loads tracking code, but nothing is confirmed to be feeding it structured ecommerce data.',
+      doesNotProve: 'Basic pageview tracking may still work — this specifically threatens ecommerce events (view_item, add_to_cart, purchase), not the tags themselves.',
+      dependency: 'GA4/GTM ecommerce reports need a populated dataLayer as input. If it\'s missing, GA4/GTM configuration doesn\'t matter yet — there\'s no data for it to read.',
       downstreamConsequences: [
-        'GA4 ecommerce reports (revenue, items, transaction IDs) will be empty or built from unreliable auto-detected events.',
-        'Ad-platform value-based bidding has no revenue signal to optimize against.',
+        'GA4 ecommerce reports (revenue, items, order IDs) will be empty or unreliable.',
+        'Ad platforms have no revenue signal to optimize bidding against.',
       ],
-      firstCheck: 'View page source and check the theme.liquid / checkout scripts for a Shopify dataLayer implementation (native Shopify Analytics, Elevar, or a custom liquid snippet). If none exists, that is the root fix before touching GTM/GA4 configuration.',
+      firstCheck: 'Check each possible reason below, in order — this scan can\'t tell which one it is.',
+      possibleReasons: [
+        {
+          cause: 'dataLayer genuinely never implemented — no native Shopify Analytics, Elevar, or custom snippet exists.',
+          howToCheck: 'Check theme.liquid / checkout scripts for a dataLayer setup. If none exists, that\'s the fix, before touching GTM/GA4 configuration at all.',
+        },
+        {
+          cause: 'Declared in the wrong order — dataLayer must exist before the GTM snippet reads it, and a lot of manual installs get this backwards.',
+          howToCheck: 'View page source: window.dataLayer = window.dataLayer || []; must appear above the GTM/gtag script tag, not below it.',
+        },
+        {
+          cause: 'A third-party app (Elevar, or a similar dataLayer-providing app) owns this and isn\'t configured or isn\'t installed correctly.',
+          howToCheck: 'This is external to what this app can inspect — check that app\'s own dashboard/settings directly, or its support docs, rather than troubleshooting it through GTM.',
+        },
+        {
+          cause: 'Pushed from inside Shopify\'s Custom Pixels sandbox — those run in an isolated worker with their own scope, so pushes there won\'t appear on window.dataLayer on the main page.',
+          howToCheck: 'Check GTM Preview mode (or the pixel\'s own debug tool) directly — it isn\'t limited by the same sandbox this scan is. Treat it as a strong signal, not final proof: Preview can behave differently from what actually runs once published.',
+        },
+      ],
       requiresDeepScan: true,
     });
   }
@@ -188,13 +264,27 @@ export function runDiagnostics(
         id: 'gtm-declared-not-observed',
         severity: 'medium',
         confidence: 'medium',
-        title: 'GTM container code present, but no container load request observed',
-        observed: [`GTM container ${surface.gtmId} found in page HTML.`, 'No googletagmanager.com/gtm.js request for this ID was captured during the page-load scan.'],
-        proves: 'The container ID is referenced in the page, but this scan did not observe it actually loading over the network.',
-        doesNotProve: 'This can also happen if the scan ran before the script executed, or if consent gating deliberately blocks it before opt-in (which is correct behavior, not a bug).',
-        dependency: 'A GTM container must actually load before any tags inside it can fire. If it is not loading, everything configured inside it is a moot point.',
-        downstreamConsequences: ['All tags configured inside this GTM container are inactive for visitors who never trigger the load.'],
-        firstCheck: 'Open the page in a real browser with DevTools Network tab open and confirm a request to googletagmanager.com/gtm.js?id=' + surface.gtmId + ' actually fires.',
+        title: 'GTM code is on the page, but never loaded',
+        observed: [`GTM container ${surface.gtmId} found in page HTML.`, 'No googletagmanager.com/gtm.js request for this ID was seen during the scan.'],
+        proves: 'The container ID is in the page, but this scan never saw it load over the network.',
+        doesNotProve: 'This can also happen if the scan ran before the script fired, or if cookie consent correctly blocked it pre-opt-in — that\'s not a bug.',
+        dependency: 'A GTM container has to load before anything inside it can fire. If it\'s not loading, nothing configured inside it matters yet.',
+        downstreamConsequences: ['Every tag inside this container is inactive for visitors who never trigger the load.'],
+        firstCheck: 'Check each possible reason below, in order — this scan can\'t tell which one it is.',
+        possibleReasons: [
+          {
+            cause: 'Scan timing — the script hadn\'t fired yet when this page load was captured.',
+            howToCheck: 'Re-run the deep scan once or twice more; a real installation should fire consistently, not intermittently.',
+          },
+          {
+            cause: 'Blocked by cookie consent, correctly, pre-opt-in — not a bug.',
+            howToCheck: 'Load the page yourself, accept the consent banner, then check DevTools Network tab for googletagmanager.com/gtm.js?id=' + surface.gtmId + '.',
+          },
+          {
+            cause: 'The container is genuinely misconfigured or was never actually published in GTM (a draft version, not a live one).',
+            howToCheck: 'Open GTM directly and confirm this container has a published, live version — not just a saved draft.',
+          },
+        ],
         requiresDeepScan: true,
       });
     }
@@ -203,13 +293,27 @@ export function runDiagnostics(
         id: 'ga4-declared-not-observed',
         severity: 'medium',
         confidence: 'medium',
-        title: 'GA4 measurement ID present, but no matching request observed',
-        observed: [`GA4 ID ${surface.ga4Id} found in page HTML.`, 'No collect request carrying this measurement ID was captured during the page-load scan.'],
-        proves: 'The measurement ID is referenced in the page but was not confirmed sending data during this scan.',
-        doesNotProve: 'Consent-gated tags correctly withholding data pre-opt-in would look identical to this — do not treat this as proof of misconfiguration on its own.',
-        dependency: 'GA4 reporting depends on the collect request actually reaching Google with this ID. A declared-but-silent tag produces zero data even though "GA4 is installed."',
-        downstreamConsequences: ['GA4 property will show little or no traffic despite the site appearing wired up, which usually gets misdiagnosed as a GA4 account problem instead of a firing problem.'],
-        firstCheck: 'Use GA4 DebugView or the Network tab to confirm a request to google-analytics.com/g/collect with tid=' + surface.ga4Id + ' fires on page load.',
+        title: 'GA4 code is on the page, but never sent data',
+        observed: [`GA4 ID ${surface.ga4Id} found in page HTML.`, 'No request carrying this measurement ID was seen during the scan.'],
+        proves: 'The measurement ID is on the page but wasn\'t confirmed sending data during this scan.',
+        doesNotProve: 'Consent-gated tags correctly withholding data pre-opt-in look identical to this — don\'t treat this as proof of a misconfiguration on its own.',
+        dependency: 'GA4 reporting needs that data request to actually reach Google. A tag that\'s "installed" but silent still produces zero data.',
+        downstreamConsequences: ['GA4 will show little or no traffic even though the site looks wired up — usually misread as a GA4 account problem instead of a firing problem.'],
+        firstCheck: 'Check each possible reason below, in order — this scan can\'t tell which one it is.',
+        possibleReasons: [
+          {
+            cause: 'Scan timing — the tag hadn\'t fired yet when this page load was captured.',
+            howToCheck: 'Re-run the deep scan once or twice more; a real installation should fire consistently.',
+          },
+          {
+            cause: 'Blocked by cookie consent, correctly, pre-opt-in — not a bug.',
+            howToCheck: 'Load the page yourself, accept the consent banner, then check GA4 DebugView or Network tab for a request to google-analytics.com/g/collect with tid=' + surface.ga4Id + '.',
+          },
+          {
+            cause: 'Routed through server-side GTM/a custom transport_url — the hit may be going to your own server endpoint, not directly to Google, which this scan\'s pattern match may not recognize as GA4 traffic.',
+            howToCheck: 'Check your sGTM container\'s own debug/preview tool directly, and confirm the transport_url destination is actually receiving and forwarding the hit.',
+          },
+        ],
         requiresDeepScan: true,
       });
     }
@@ -218,13 +322,13 @@ export function runDiagnostics(
         id: 'ga4-id-mismatch',
         severity: 'high',
         confidence: 'measured',
-        title: 'GA4 ID in page HTML does not match the ID actually firing',
+        title: 'The GA4 ID on the page isn\'t the one actually firing',
         observed: [`Page HTML declares ${surface.ga4Id}.`, `Network requests observed firing with: ${deep!.observedIds.ga4.join(', ')}.`],
-        proves: 'Two different GA4 measurement IDs are involved — one referenced statically, a different one actually sending data.',
+        proves: 'Two different GA4 IDs are involved — one shown in the page, a different one actually sending data.',
         doesNotProve: 'Nothing further — this is a direct, measured mismatch, not an inference.',
-        dependency: 'Whoever owns GA4 reporting needs to know which property is actually receiving this traffic — it is not the one visible in page source.',
-        downstreamConsequences: ['Anyone checking the "obvious" GA4 property (the one in page source) will see no data and wrongly conclude tracking is broken.'],
-        firstCheck: `Check GA4 property ${deep!.observedIds.ga4.join(', ')} directly — that is where this traffic is actually landing.`,
+        dependency: 'Whoever owns GA4 reporting needs to know which property is actually receiving this traffic — it\'s not the one visible in the page.',
+        downstreamConsequences: ['Anyone checking the "obvious" GA4 property will see no data and wrongly assume tracking is broken.'],
+        firstCheck: `Check GA4 property ${deep!.observedIds.ga4.join(', ')} directly — that's where this traffic is actually going.`,
         requiresDeepScan: true,
       });
     }
@@ -241,13 +345,13 @@ export function runDiagnostics(
       id: 'manual-gtm-mismatch',
       severity: 'high',
       confidence: 'measured',
-      title: 'Supplied GTM ID does not match what evidence shows',
+      title: 'Your GTM ID doesn\'t match what the evidence shows',
       observed: [`Supplied GTM ID: ${manual.gtmId}.`, `Evidence (static HTML + deep scan, where available) shows: ${allObservedGtmIds.join(', ')}.`],
-      proves: 'The GTM ID entered for this audit is not the one actually present on this page.',
+      proves: 'The GTM ID entered for this audit isn\'t the one actually on this page.',
       doesNotProve: 'Nothing further — this is a direct, measured mismatch, not an inference.',
-      dependency: 'Every conclusion in this audit that assumes the supplied ID is correct needs re-checking once the right container is confirmed.',
-      downstreamConsequences: ['Findings framed around the wrong container may misdirect the fix.'],
-      firstCheck: `Confirm this is the right store/container — evidence points to ${allObservedGtmIds.join(', ')}, not ${manual.gtmId}.`,
+      dependency: 'Every conclusion in this audit that assumes your ID is correct needs a second look once the right container is confirmed.',
+      downstreamConsequences: ['Findings built around the wrong container may point at the wrong fix.'],
+      firstCheck: `Double check this is the right store/container — evidence points to ${allObservedGtmIds.join(', ')}, not ${manual.gtmId}.`,
       requiresDeepScan: false,
     });
   }
@@ -261,13 +365,13 @@ export function runDiagnostics(
         id: 'manual-ga4-mismatch',
         severity: 'high',
         confidence: 'measured',
-        title: 'Supplied GA4 ID does not match what evidence shows',
+        title: 'Your GA4 ID doesn\'t match what the evidence shows',
         observed: [`Supplied GA4 ID: ${manual.ga4Id}.`, `Evidence (static HTML + deep scan, where available) shows: ${allObservedGa4Ids.join(', ')}.`],
-        proves: 'The GA4 ID entered for this audit is not the one actually present/firing on this page.',
+        proves: 'The GA4 ID entered for this audit isn\'t the one actually present/firing on this page.',
         doesNotProve: 'Nothing further — this is a direct, measured mismatch, not an inference.',
-        dependency: 'Every conclusion in this audit that assumes the supplied ID is correct needs re-checking once the right property is confirmed.',
-        downstreamConsequences: ['Findings framed around the wrong property may misdirect the fix.'],
-        firstCheck: `Confirm this is the right property — evidence points to ${allObservedGa4Ids.join(', ')}, not ${manual.ga4Id}.`,
+        dependency: 'Every conclusion in this audit that assumes your ID is correct needs a second look once the right property is confirmed.',
+        downstreamConsequences: ['Findings built around the wrong property may point at the wrong fix.'],
+        firstCheck: `Double check this is the right property — evidence points to ${allObservedGa4Ids.join(', ')}, not ${manual.ga4Id}.`,
         requiresDeepScan: false,
       });
     }
@@ -279,30 +383,97 @@ export function runDiagnostics(
       id: 'datalayer-no-events-on-load',
       severity: 'info',
       confidence: 'high',
-      title: 'dataLayer exists, but no events were readable on page load',
-      observed: ['window.dataLayer is present.', 'No entries with a recognizable event name were found in the first 25 dataLayer pushes captured on load.'],
+      title: 'dataLayer exists, but no events showed up on load',
+      observed: ['window.dataLayer is present.', 'No recognizable event names were found in the first 25 dataLayer entries captured on load.'],
       proves: 'A dataLayer object exists on the page.',
-      doesNotProve: 'This does NOT show whether add_to_cart, view_item, or purchase events fire — those are interaction- or navigation-triggered and cannot appear in a read-only homepage-load scan by design.',
-      dependency: 'Event-level validation (add_to_cart, purchase) is a downstream check that requires either a manual guided walkthrough or imported evidence — not something this scan can or should claim.',
+      doesNotProve: 'This does NOT show whether add_to_cart, view_item, or purchase fire — those only happen when a visitor clicks or navigates, which a homepage-load scan can\'t see.',
+      dependency: 'Checking real events (add_to_cart, purchase) needs a manual walkthrough or imported evidence — not something a page-load scan can tell you.',
       downstreamConsequences: [],
-      firstCheck: 'Use the guided checks below (GTM Preview / GA4 DebugView) to validate interaction events manually — do not treat this scan as having ruled them in or out.',
+      firstCheck: 'Check each possible reason below, in order — this scan can\'t tell which one it is.',
+      possibleReasons: [
+        {
+          cause: 'Normal — add_to_cart/purchase are interaction-triggered, not page-load events, so a homepage load genuinely wouldn\'t show them.',
+          howToCheck: 'Use the guided checks (GTM Preview / GA4 DebugView) to click through a real interaction and confirm events fire — this scan structurally cannot see them.',
+        },
+        {
+          cause: 'Events use non-standard naming this scan\'s pattern match didn\'t recognize.',
+          howToCheck: 'Open GTM Preview and look at the raw dataLayer pushes directly, rather than relying on this scan\'s event-name detection.',
+        },
+        {
+          cause: 'Pushed from inside Shopify\'s Custom Pixels sandbox — isolated from the main-page dataLayer this scan reads.',
+          howToCheck: 'Check the pixel\'s own debug tool or GTM/sGTM Preview mode directly — same caveat as above: a strong signal for what\'s pushed, not a guarantee it\'ll match live behavior once anything changes post-publish.',
+        },
+      ],
       requiresDeepScan: true,
     });
   }
 
-  // R6 — compliance: tags active, no CMP detected
-  if (anyStaticTag && !surface.hasCmp) {
+  // R6 — compliance: tags active, no CMP detected. `region` only sharpens
+  // which law gets named in the text below — it never changes whether this
+  // finding fires, since "tags active + no CMP signature" is the same
+  // observation everywhere. "Active" means either a static signature OR a
+  // real deep-scan-observed request — gating on static evidence alone
+  // missed a real case live (magicspoon.com, 2026-08-15): every tag loaded
+  // dynamically, deep scan confirmed GTM/GA4/Meta/TikTok all firing with no
+  // CMP detected, and this rule silently never fired because it only ever
+  // checked static HTML for "is anything active."
+  if ((anyStaticTag || anyObservedRequest) && !surface.hasCmp) {
+    const tagsSeenOnlyInNetwork = !anyStaticTag && anyObservedRequest;
+    const privacyRule = region
+      ? `Most privacy rules require consent before non-essential tracking runs — for this store's market, that's ${REGIONS[region].privacyTerm} (${REGIONS[region].label}).`
+      : 'Most privacy rules require consent before non-essential tracking runs.';
     findings.push({
       id: 'no-cmp-with-active-tags',
       severity: 'medium',
       confidence: 'low',
-      title: 'Tracking tags active, no known consent tool detected',
-      observed: ['At least one tracking signature (GTM/GA4/Meta/TikTok) found on page load.', 'No known CMP script signature (OneTrust, Cookiebot, CookieYes, etc.) matched in page HTML.'],
+      title: 'Tracking is active, but no consent tool was found',
+      observed: [
+        tagsSeenOnlyInNetwork
+          ? 'Tracking requests (GTM/GA4/Meta/TikTok) observed firing during the deep scan — not present in static HTML.'
+          : 'At least one tracking signature (GTM/GA4/Meta/TikTok) found on page load.',
+        'No known consent-tool signature (OneTrust, Cookiebot, CookieYes, etc.) matched in page HTML.',
+      ],
       proves: 'No third-party consent-management script from the known signature list was detected.',
-      doesNotProve: 'This does NOT confirm a compliance gap — Shopify\'s native consent banner (if enabled in Admin > Customer privacy) is not covered by this signature list and would not be detected here.',
-      dependency: 'Regional privacy rules generally require consent before non-essential tracking runs. If tags are active pre-consent, the CMP (or its absence) is the upstream control point — not the individual tags.',
-      downstreamConsequences: ['Potential regulatory exposure if tags genuinely fire before consent, depending on the store\'s target markets.'],
-      firstCheck: 'Check Shopify Admin > Settings > Customer privacy for the native consent banner, and confirm in GTM whether Consent Mode is wired to gate tags on grant/deny.',
+      doesNotProve: 'This does NOT confirm a compliance gap — Shopify\'s built-in consent banner (if enabled under Customer privacy settings) isn\'t on this signature list and wouldn\'t be detected here.',
+      dependency: `${privacyRule} If tags are active before consent, the consent tool (or its absence) is what to fix — not the individual tags.`,
+      downstreamConsequences: ['Possible regulatory exposure if tags genuinely fire before consent, depending on the store\'s target markets.'],
+      firstCheck: 'Check each possible reason below, in order — this scan can\'t tell which one it is.',
+      possibleReasons: [
+        {
+          cause: 'Genuinely no consent tool configured anywhere.',
+          howToCheck: 'Check Shopify Admin\'s Customer privacy settings — if nothing\'s enabled there either, this is the real gap. Search: "Shopify customer privacy settings" if the menu location has moved.',
+        },
+        {
+          cause: 'Shopify\'s own built-in consent banner is enabled — it\'s not on this scan\'s known-signature list, so it wouldn\'t be detected here even if active.',
+          howToCheck: 'Check Shopify Admin\'s Customer privacy settings directly to confirm whether the native banner is on. Search: "Shopify customer privacy settings" if the menu location has moved.',
+        },
+        {
+          cause: 'A consent tool outside the known signature list (an app-based or custom CMP) is running.',
+          howToCheck: 'This is external to what this scan\'s signature list covers — check that app/tool\'s own settings directly, and confirm in GTM whether Consent Mode gates tags on accept/decline.',
+        },
+      ],
+      requiresDeepScan: tagsSeenOnlyInNetwork,
+    });
+  }
+
+  // R7 — legacy Universal Analytics snippet still present. Not a functional
+  // failure (UA stopped processing data in July 2023, this can't be
+  // "broken" any further than it already permanently is) — it's clutter
+  // that real, established stores routinely carry from before the mandatory
+  // GA4 migration, never cleaned up. Worth surfacing so it doesn't get
+  // mistaken for live tracking when someone else audits this later.
+  if (surface.hasLegacyUa) {
+    findings.push({
+      id: 'legacy-ua-present',
+      severity: 'info',
+      confidence: 'measured',
+      title: 'Old Universal Analytics snippet still on the page',
+      observed: [`A Universal Analytics ID (${surface.legacyUaId}) was found in the page HTML.`],
+      proves: 'This store still carries a Universal Analytics snippet from before the GA4 migration.',
+      doesNotProve: 'This does not indicate a current tracking problem — UA stopped collecting data in July 2023 and cannot fire, work, or break any further than it already has.',
+      dependency: 'Not a dependency for anything downstream — this is dead code, not a broken link in the tracking chain.',
+      downstreamConsequences: ['Can confuse a future audit into thinking there\'s a second, older analytics setup still active.'],
+      firstCheck: 'Safe to remove from the theme whenever convenient — it collects nothing and blocks nothing.',
       requiresDeepScan: false,
     });
   }
@@ -313,13 +484,13 @@ export function runDiagnostics(
       id: 'no-blocking-dependency-issue',
       severity: 'info',
       confidence: hasDeep ? 'medium' : 'low',
-      title: 'No page-load blocking issues found',
-      observed: ['Tracking signatures present and, where deep-scan evidence exists, reconciled against observed network requests.'],
-      proves: 'Nothing in this read-only page-load evidence points to a broken upstream dependency.',
-      doesNotProve: 'This does not confirm checkout-level events (add_to_cart, purchase) fire correctly, nor that ad-platform attribution is accurate — those require the guided manual checks or Tab 2 access.',
-      dependency: 'Page-load evidence is the shallowest layer of the pipeline. Clear page-load evidence just means the next layer (interaction events, checkout) is where to look next.',
+      title: 'No blocking issues found on page load',
+      observed: ['Tracking signatures present and, where deep-scan evidence exists, checked against observed network requests.'],
+      proves: 'Nothing in this page-load evidence points to a broken tracking setup.',
+      doesNotProve: 'This does not confirm checkout events (add_to_cart, purchase) fire correctly, or that ad-platform attribution is accurate — those need the guided manual checks or Tab 2 access.',
+      dependency: 'Page-load evidence is the shallowest layer. Clean evidence here just means the next layer (interaction events, checkout) is where to look next.',
       downstreamConsequences: [],
-      firstCheck: 'Proceed to the guided manual checks (GTM Preview, GA4 DebugView, ad-platform diagnostics, Shopify order reconciliation) to validate the parts a page-load scan cannot see.',
+      firstCheck: 'Move on to the guided manual checks (GTM Preview, GA4 DebugView, ad-platform checks, Shopify order reconciliation) to check what a page-load scan can\'t see.',
       requiresDeepScan: false,
     });
   }
@@ -332,4 +503,36 @@ export function runDiagnostics(
     earliestFailure,
     evidenceDepth: hasDeep ? 'surface+deep' : 'surface-only',
   };
+}
+
+export interface FindingCategoryInfo {
+  category: string;
+  fixType: string;
+}
+
+// Maps each finding id to a stable category + concrete fix type, so leads
+// (and findings generally) can be grouped by "what kind of problem" and
+// searched/filtered by "what kind of fix," not just read one at a time off
+// a flat id. Kept as a separate lookup rather than a field on
+// DiagnosticFinding — this is a display/grouping concern, not part of the
+// evidence-and-proof contract (observed/proves/doesNotProve/...) each
+// finding makes.
+export const FINDING_CATEGORIES: Record<string, FindingCategoryInfo> = {
+  'no-measurement-layer': { category: 'Measurement/Attribution', fixType: 'Install a measurement layer (GTM/GA4)' },
+  'static-scan-only-inconclusive': { category: 'Pending', fixType: 'Run a deep scan to confirm' },
+  'duplicate-gtm-containers': { category: 'Container/Technical Setup', fixType: 'Remove the duplicate GTM container' },
+  'tags-without-datalayer': { category: 'Container/Technical Setup', fixType: 'Wire tags to a populated dataLayer' },
+  'gtm-declared-not-observed': { category: 'Measurement/Attribution', fixType: 'Fix GTM container not firing' },
+  'ga4-declared-not-observed': { category: 'Measurement/Attribution', fixType: 'Fix GA4 not sending data' },
+  'ga4-id-mismatch': { category: 'Measurement/Attribution', fixType: 'Correct the declared GA4 ID' },
+  'manual-gtm-mismatch': { category: 'Measurement/Attribution', fixType: 'Reconcile GTM ID mismatch' },
+  'manual-ga4-mismatch': { category: 'Measurement/Attribution', fixType: 'Reconcile GA4 ID mismatch' },
+  'datalayer-no-events-on-load': { category: 'Container/Technical Setup', fixType: 'Confirm interaction events actually fire' },
+  'no-cmp-with-active-tags': { category: 'Consent/Compliance', fixType: 'Install/connect a consent management tool' },
+  'legacy-ua-present': { category: 'Cleanup', fixType: 'Remove the legacy Universal Analytics snippet' },
+  'no-blocking-dependency-issue': { category: 'Clean', fixType: 'No action needed' },
+};
+
+export function getFindingCategory(id: string): FindingCategoryInfo {
+  return FINDING_CATEGORIES[id] ?? { category: 'Uncategorized', fixType: 'Review manually' };
 }

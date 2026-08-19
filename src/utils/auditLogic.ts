@@ -17,7 +17,7 @@ import type { Region } from './constants.ts';
 import { formatCurrency } from './formatters.ts';
 import { runDiagnostics } from './diagnosticEngine.ts';
 import { buildTopIssues, COD_TYPICAL_MARKETS } from './topIssues.ts';
-import type { TopIssuesResult } from './topIssues.ts';
+import type { TopIssuesResult, TopIssueCategory, TopIssue } from './topIssues.ts';
 
 export interface AuditInputs {
   grossRevenue: number;
@@ -38,7 +38,6 @@ export interface AuditResults {
   rtoPct: number;
   rtoLoss: number;
   codPct: number;
-  codLoss: number;
   grossMargin: number;
   grossRevenue: number;
   netOutcome: number;
@@ -79,15 +78,26 @@ export interface AuditDashboardResult {
   url: string;
   score: number;
   status: 'ok' | 'error';
+  // Carried straight through from the surface scan — was already captured
+  // on every run but only ever wired into the Lead Register's own display,
+  // silently dropped for any ad-hoc Deep Scan run outside the Register.
+  contactSignals?: SurfaceAuditResult['contactSignals'];
   metrics: {
     gtmDetected: boolean;
     gtmId: string;
     ga4Active: boolean;
     ga4Id: string;
     metaPixel: boolean;
+    metaPixelId: string | null;
     tiktokPixel: boolean;
+    tiktokPixelId: string | null;
     cmpDetected: boolean;
     cmpName: string;
+    hasPinterestTag: boolean;
+    pinterestTagId: string | null;
+    hasSnapchatPixel: boolean;
+    snapchatPixelId: string | null;
+    hasMicrosoftUet: boolean;
     pageSpeed: string;
     sslValid: boolean;
     grossRevenue: number;
@@ -117,6 +127,9 @@ export interface AuditDashboardResult {
     }>;
     topIssues: TopIssuesResult;
     volumeNote?: string;
+    /** What the operator typed in from the client, verbatim — never treated as a verified finding, only as context and a ranking hint. */
+    clientReportedIssue?: string;
+    clientReportedCategory?: TopIssueCategory;
   };
 }
 
@@ -152,9 +165,31 @@ export interface SurfaceAuditResult {
   hasCmp: boolean;
   cmpName: string | null;
   sslValid: boolean;
-  missingSignalCount: number; // out of 4 (GTM, GA4, Meta, TikTok)
+  missingSignalCount: number; // out of 4 (GTM, GA4, Meta, TikTok) — the "core" set the score is built on
   blindSpotPct: number;
   cards: SurfaceMetricCard[];
+  // Additional signals real, established stores commonly carry, tracked
+  // separately from the core 4 rather than folded into missingSignalCount/
+  // blindSpotPct — presence or absence of these isn't itself "good" or
+  // "bad" the way core-tracking absence is, so they don't change the score.
+  hasLegacyUa: boolean;
+  legacyUaId: string | null;
+  hasPinterestTag: boolean;
+  pinterestTagId: string | null;
+  hasSnapchatPixel: boolean;
+  snapchatPixelId: string | null;
+  hasMicrosoftUet: boolean;
+  // Public research starting points for reaching the actual decision-maker
+  // instead of a generic inbox — deliberately limited to what the store's
+  // own public page already publishes (social links, a mailto:, a link to
+  // its own About/Team/Contact page). Never a lookup against a third-party
+  // profile or directory — that would cross from "reading a public page"
+  // into people-search, which stays a manual step by design.
+  contactSignals: {
+    socialLinks: Array<{ platform: string; url: string }>;
+    contactEmail: string | null;
+    aboutOrContactPageUrl: string | null;
+  };
 }
 
 // Vite proxies /api to the local backend in development, so the UI does not
@@ -213,10 +248,69 @@ function escapeHtml(input: string): string {
 }
 
 /**
+ * Every server error response ships both a short `error` label and a real
+ * `detail: err.message` (see server.cjs) — but every fetch helper below was
+ * only ever surfacing `error`, silently dropping `detail`. That's the exact
+ * gap that turned a real, actionable Google API error ("Analytics Admin API
+ * is disabled — enable it here: ...") into a dead-end "Could not list GA4
+ * properties" with no next step. Fixed once, here, instead of patching each
+ * call site's fallback text individually.
+ */
+function errorFromResponseBody(body: any, fallback: string): Error {
+  if (body?.error && body?.detail) return new Error(`${body.error}: ${body.detail}`);
+  return new Error(body?.error || fallback);
+}
+
+/**
  * Fetches the real storefront HTML through the local proxy and scans it
  * for tracking signatures. No fake data — if the proxy is down or the
  * store is unreachable, this throws instead of silently faking results.
  */
+// Extracts only what the page itself already publishes for reaching a real
+// person — social profile links (from the store's own footer/header, not a
+// third-party search), a published mailto: address, and a link to the
+// store's own About/Team/Contact page. Pure regex over already-fetched
+// public HTML; never a request to a social platform or directory.
+function extractContactSignals(html: string): SurfaceAuditResult['contactSignals'] {
+  const socialPatterns: Array<[string, RegExp]> = [
+    ['Instagram', /href=["'](https?:\/\/(?:www\.)?instagram\.com\/[^"'\s?#]+)/gi],
+    ['LinkedIn', /href=["'](https?:\/\/(?:www\.)?linkedin\.com\/(?:company|in)\/[^"'\s?#]+)/gi],
+    ['Twitter/X', /href=["'](https?:\/\/(?:www\.)?(?:twitter|x)\.com\/[^"'\s?#]+)/gi],
+    ['Facebook', /href=["'](https?:\/\/(?:www\.)?facebook\.com\/[^"'\s?#]+)/gi],
+  ];
+  const socialLinks: Array<{ platform: string; url: string }> = [];
+  const seen = new Set<string>();
+  for (const [platform, pattern] of socialPatterns) {
+    for (const match of html.matchAll(pattern)) {
+      const url = match[1];
+      // Share/follow-intent widget links (e.g. facebook.com/sharer/sharer.php,
+      // x.com/intent/user — confirmed live on mejuri.com, a "Follow" button,
+      // not their actual profile) are noise, not the brand's own profile.
+      if (/sharer|share\.php|\/intent\/|dialog\/share/i.test(url)) continue;
+      // Individual post/reel/story permalinks from an embedded Instagram
+      // feed widget (e.g. instagram.com/reel/DZNYpaAhUkQ/ — confirmed live
+      // on treatyjewellery.com, a homepage feed embed) aren't the brand's
+      // profile link either.
+      if (/instagram\.com\/(p|reel|tv|stories)\//i.test(url)) continue;
+      // Same profile linked twice with/without "www." or a trailing slash is
+      // extremely common (header + footer) — normalize before dedup-checking.
+      const normalized = url.toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '');
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      socialLinks.push({ platform, url });
+    }
+  }
+
+  const mailtoMatch = html.match(/href=["']mailto:([^"'?\s]+)/i);
+  const aboutMatch = html.match(/href=["']([^"']*\/pages\/(?:about[\w-]*|our-story|team|meet-the-team|contact[\w-]*))["']/i);
+
+  return {
+    socialLinks,
+    contactEmail: mailtoMatch ? mailtoMatch[1] : null,
+    aboutOrContactPageUrl: aboutMatch ? aboutMatch[1] : null,
+  };
+}
+
 async function scanStoreHtml(storeUrl: string): Promise<{
   html: string;
   gtmId: string | null;
@@ -228,35 +322,81 @@ async function scanStoreHtml(storeUrl: string): Promise<{
   tiktokPixelId: string | null;
   hasCmp: boolean;
   cmpName: string | null;
+  hasLegacyUa: boolean;
+  legacyUaId: string | null;
+  hasPinterestTag: boolean;
+  pinterestTagId: string | null;
+  hasSnapchatPixel: boolean;
+  snapchatPixelId: string | null;
+  hasMicrosoftUet: boolean;
+  contactSignals: SurfaceAuditResult['contactSignals'];
 }> {
   const res = await fetch(`${PROXY_BASE}/scan?url=${encodeURIComponent(storeUrl)}`);
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Proxy returned ${res.status}`);
+    throw errorFromResponseBody(body, `Proxy returned ${res.status}`);
   }
 
   const { html } = await res.json();
 
   const gtmIdsAll = Array.from(new Set((html.match(/GTM-[A-Z0-9]+/g) as string[] | null) || []));
-  const ga4Match = html.match(/G-[A-Z0-9]{6,}/);
+  // Real GA4 IDs are always exactly "G-" + 10 alphanumeric chars, and are
+  // effectively always a mix of letters and digits (Google generates them
+  // pseudo-randomly, never as a readable word). The old open-ended
+  // /G-[A-Z0-9]{6,}/ matched the first "G-" + 6-or-more run anywhere in the
+  // page — including inside CSS custom property names built from English
+  // words (--COLOR-BG-GRADIENT contains "G-GRADIENT", --FONT-SUBHEADING
+  // contains "G-SUBHEADING", etc.), confirmed live on shopflavcity.com
+  // where it grabbed "G-GRADIENT" instead of the real "G-66LXV4EHDF" a few
+  // lines later — a false positive that would have made a genuine
+  // ga4-id-mismatch finding rest on a fabricated-by-accident declared ID.
+  // Requiring exactly 10 chars AND at least one digit rejects every CSS
+  // word match while still matching the real ID.
+  const ga4Candidates = (html.match(/G-[A-Z0-9]{10}\b/g) as string[] | null) || [];
+  const ga4Match = ga4Candidates.find((id) => /[0-9]/.test(id.slice(2))) || null;
   const hasMetaPixel = /fbq\s*\(\s*['"]init['"]/.test(html) || /connect\.facebook\.net\/en_US\/fbevents/.test(html);
   const metaPixelMatch = html.match(/fbq\(\s*['"]init['"]\s*,\s*['"](\d{6,})['"]/);
   const hasTiktokPixel = /ttq\.load\s*\(/.test(html);
   const tiktokPixelMatch = html.match(/ttq\.load\(\s*['"]([A-Z0-9]{10,})['"]/i);
   const cmp = detectCmp(html);
 
+  // Legacy Universal Analytics — stopped processing data in July 2023, but
+  // real stores that have been live a while routinely still have the old
+  // snippet sitting in the theme, never removed. Detecting it isn't about
+  // finding a "bug" (it's inert, not broken); it's clutter and confusion
+  // when someone else is trying to figure out what's actually tracking.
+  const legacyUaMatch = html.match(/UA-\d{4,10}-\d{1,4}/);
+
+  // Signature patterns confirmed against each platform's current official
+  // docs (Pinterest developers.pinterest.com, Snap community docs, Microsoft
+  // Advertising Learn docs) rather than assumed from memory — see chat.
+  const hasPinterestTag = /pintrk\s*\(\s*['"]load['"]/.test(html) || /s\.pinimg\.com\/ct\/core\.js/.test(html);
+  const pinterestTagMatch = html.match(/pintrk\(\s*['"]load['"]\s*,\s*['"]([\w-]+)['"]/);
+  const hasSnapchatPixel = /snaptr\s*\(\s*['"]init['"]/.test(html) || /sc-static\.net\/scevent\.min\.js/.test(html);
+  const snapchatPixelMatch = html.match(/snaptr\(\s*['"]init['"]\s*,\s*['"]([\w-]+)['"]/);
+  const hasMicrosoftUet = /\buetq\b/.test(html) || /bat\.bing\.com\/bat\.js/.test(html);
+  const contactSignals = extractContactSignals(html);
+
   return {
     html,
     gtmId: gtmIdsAll[0] || null,
     gtmIdsAll,
-    ga4Id: ga4Match ? ga4Match[0] : null,
+    ga4Id: ga4Match,
     hasMetaPixel,
     metaPixelId: metaPixelMatch ? metaPixelMatch[1] : null,
     hasTiktokPixel,
     tiktokPixelId: tiktokPixelMatch ? tiktokPixelMatch[1] : null,
     hasCmp: cmp.found,
     cmpName: cmp.name,
+    hasLegacyUa: !!legacyUaMatch,
+    legacyUaId: legacyUaMatch ? legacyUaMatch[0] : null,
+    hasPinterestTag,
+    pinterestTagId: pinterestTagMatch ? pinterestTagMatch[1] : null,
+    hasSnapchatPixel,
+    snapchatPixelId: snapchatPixelMatch ? snapchatPixelMatch[1] : null,
+    hasMicrosoftUet,
+    contactSignals,
   };
 }
 
@@ -320,6 +460,12 @@ export function buildSurfaceCards(
   cmpName: string | null,
   region: Region
 ): SurfaceMetricCard[] {
+  // Whether the PRECONDITION for measuring ad performance exists at all —
+  // real evidence (tracking presence), never a fabricated ROAS/CAC number.
+  // A surface scan can honestly say "attribution is broken," never "ROAS is 1.4x."
+  const attributionBroken = effective.missingSignalCount === 4;
+  const attributionPartial = effective.missingSignalCount > 0 && effective.missingSignalCount < 4;
+
   return [
     {
       label: 'Attribution',
@@ -331,13 +477,6 @@ export function buildSurfaceCards(
         : 'Public page-load signal only. It does not measure customer journeys or conversion attribution — run a deep scan for stronger evidence.',
     },
     {
-      label: 'ROAS Measurement Risk',
-      value: effective.missingSignalCount > 0 ? 'ROAS needs confirmation in platform data' : 'Tag presence detected; ROAS still unconfirmed',
-      tone: effective.missingSignalCount > 0 ? 'warn' : 'good',
-      explainer: 'Are your ads actually making you money, or just spending it?',
-      confidence: 'No spend, revenue, or ROAS is calculated from a surface scan.',
-    },
-    {
       label: `Compliance (${REGIONS[region].privacyTerm} tracking)`,
       value: hasCmp ? `Consent tool detected (${cmpName})` : 'No consent tool detected',
       tone: hasCmp ? 'good' : 'warn',
@@ -346,32 +485,82 @@ export function buildSurfaceCards(
         ? 'Presence confirmed on page load.'
         : 'Absence noted from page load only — does not itself confirm legal exposure.',
     },
+    // The 8 cards below are the same "Top 8 Business Metrics" shown once
+    // real Shopify/financial data is loaded (With Access tab) — same
+    // labels, so stage 1 previews exactly what stage 2 confirms. None of
+    // these ever show a fabricated number or a region-based guess: where
+    // real surface evidence exists (tracking presence), the value is an
+    // honest possibility statement grounded in that evidence; a URL scan
+    // has zero public signal for revenue, margin, cash flow, RTO, COD, or
+    // settlement lag regardless of market, so all six stay locked. Value
+    // stays empty string on purpose (2026-08-15, explicit user request —
+    // removed the repeated "Credentials Safe" status line entirely, not
+    // just hid it) — the trust pitch lives once in the banner above the
+    // card grid (App.tsx), and the explainer alone carries each card now.
+    // (Stage 2's real businessMetrics array is where region legitimately
+    // sharpens interpretation — of measured numbers, not guesses.)
+    {
+      label: 'Gross Revenue',
+      value: '',
+      tone: 'good',
+      explainer: 'Is this store doing real volume, or is a full audit not even worth your time yet?',
+      locked: true,
+    },
+    {
+      label: 'ROAS',
+      value: attributionBroken
+        ? 'Unmeasurable — no ad-tracking signal found'
+        : attributionPartial
+          ? 'Partially measurable — some channels untracked'
+          : 'Tracking present — real ROAS still needs live spend data',
+      tone: attributionBroken ? 'bad' : 'warn',
+      explainer: 'Are your ads actually making money, or is spend just leaking out untracked?',
+      locked: false,
+    },
     {
       label: 'CAC',
-      value: 'Needs live access',
-      tone: 'warn',
-      explainer: 'What are you paying to get one buyer — and is that buyer worth more than that?',
-      locked: true,
+      value: attributionBroken
+        ? 'Unmeasurable — no conversion tracking found'
+        : attributionPartial
+          ? 'Partially measurable — some channels untracked'
+          : 'Tracking present — real CAC still needs live spend data',
+      tone: attributionBroken ? 'bad' : 'warn',
+      explainer: 'Do you know what it actually costs to win one customer, or is that a guess right now?',
+      locked: false,
     },
     {
       label: 'Gross Margin',
-      value: 'Needs live access',
-      tone: 'warn',
-      explainer: "After product cost, shipping, and fees — what's actually left per order?",
-      locked: true,
-    },
-    {
-      label: 'COD Failure Rate',
-      value: 'Needs live access',
-      tone: 'warn',
-      explainer: 'How much revenue walks away at the door when the customer refuses the package?',
+      value: '',
+      tone: 'good',
+      explainer: 'After product cost and shipping, is there real margin left — or just revenue?',
       locked: true,
     },
     {
       label: 'RTO Rate',
-      value: 'Needs live access',
-      tone: 'warn',
-      explainer: "How much is it costing you to ship an order that never even gets delivered?",
+      value: '',
+      tone: 'good',
+      explainer: 'How much revenue walks away at the door when a delivery is refused?',
+      locked: true,
+    },
+    {
+      label: 'COD Share',
+      value: '',
+      tone: 'good',
+      explainer: 'How exposed is this store to cash-on-delivery risk?',
+      locked: true,
+    },
+    {
+      label: 'Settlement Lag (cash locked)',
+      value: '',
+      tone: 'good',
+      explainer: "Is cash this store has already earned stuck waiting to settle?",
+      locked: true,
+    },
+    {
+      label: 'Cash Flow Health',
+      value: '',
+      tone: 'good',
+      explainer: 'Once ad spend is counted, is this business actually solvent?',
       locked: true,
     },
   ];
@@ -412,6 +601,14 @@ export const runSurfaceAudit = async (
       missingSignalCount: 4,
       blindSpotPct: 100,
       cards: [],
+      hasLegacyUa: false,
+      legacyUaId: null,
+      hasPinterestTag: false,
+      pinterestTagId: null,
+      hasSnapchatPixel: false,
+      snapchatPixelId: null,
+      hasMicrosoftUet: false,
+      contactSignals: { socialLinks: [], contactEmail: null, aboutOrContactPageUrl: null },
     };
   }
 
@@ -439,6 +636,14 @@ export const runSurfaceAudit = async (
     missingSignalCount: effective.missingSignalCount,
     blindSpotPct: effective.blindSpotPct,
     cards,
+    hasLegacyUa: scan.hasLegacyUa,
+    legacyUaId: scan.legacyUaId,
+    hasPinterestTag: scan.hasPinterestTag,
+    pinterestTagId: scan.pinterestTagId,
+    hasSnapchatPixel: scan.hasSnapchatPixel,
+    snapchatPixelId: scan.snapchatPixelId,
+    hasMicrosoftUet: scan.hasMicrosoftUet,
+    contactSignals: scan.contactSignals,
   };
 };
 
@@ -455,13 +660,20 @@ export const runSurfaceAudit = async (
  */
 export const runFullAudit = async (
   storeUrl: string,
-  inputs: AuditInputs,
+  // Optional on purpose — the tracking-diagnostic half of this audit
+  // (GTM/GA4/pixel evidence, dataLayer, consent, Locate+Point+Guide) doesn't
+  // need Shopify order data at all. null here means "no CSV/live pull
+  // loaded yet" — businessMetrics/leaks/volumeNote degrade to an honest
+  // "Unaccessed" state below rather than computing off fabricated zeros.
+  inputs: AuditInputs | null,
   manualGtmId: string | null = null,
   manualGa4Id: string | null = null,
   region: Region = 'US',
-  deepEvidence: DeepScanResult | null = null
+  deepEvidence: DeepScanResult | null = null,
+  clientReportedIssue: string | null = null,
+  clientReportedCategory: TopIssueCategory | null = null
 ): Promise<AuditDashboardResult> => {
-  const audit = calculateAudit(inputs);
+  const audit = inputs ? calculateAudit(inputs) : null;
 
   let scan: Awaited<ReturnType<typeof scanStoreHtml>>;
   try {
@@ -507,16 +719,41 @@ export const runFullAudit = async (
   recommendations.push(
     scan.hasCmp
       ? { type: 'success', text: `Consent management tool detected (${scan.cmpName}).` }
-      : { type: 'warning', text: 'No consent management tool detected — DPDP-aligned tracking risk, verify manually before claiming compliance.' }
+      : { type: 'warning', text: `No consent tool detected — possible risk under ${REGIONS[region].label} privacy rules, verify manually before claiming compliance.` }
   );
-  recommendations.push({
-    type: 'info',
-    text: `RTO impact is ${audit.rtoPct.toFixed(2)}% of orders; COD share is ${audit.codPct.toFixed(2)}%.`,
-  });
-  if (audit.burnRateUnsustainable) {
+  // These 3 are outside the "core 4" score — absence isn't flagged (not
+  // every store runs Pinterest/Snapchat/Microsoft Ads), but presence is
+  // worth surfacing since it's tracking infrastructure the operator needs
+  // to know about, same as Meta/TikTok. Legacy UA is dead code, not a
+  // tracking gap — stopped processing in July 2023 — flagged as clutter
+  // to clean up, not a functional problem.
+  if (scan.hasPinterestTag) {
+    recommendations.push({ type: 'success', text: `Pinterest Tag detected${scan.pinterestTagId ? ` (${scan.pinterestTagId})` : ''}.` });
+  }
+  if (scan.hasSnapchatPixel) {
+    recommendations.push({ type: 'success', text: `Snapchat Pixel detected${scan.snapchatPixelId ? ` (${scan.snapchatPixelId})` : ''}.` });
+  }
+  if (scan.hasMicrosoftUet) {
+    recommendations.push({ type: 'success', text: 'Microsoft Ads (UET) tag detected.' });
+  }
+  if (scan.hasLegacyUa) {
+    recommendations.push({ type: 'info', text: `Legacy Universal Analytics snippet still present (${scan.legacyUaId}) — stopped collecting data in July 2023, safe to remove, but adds noise when auditing what's actually tracking.` });
+  }
+  if (audit) {
     recommendations.push({
-      type: 'warning',
-      text: 'Ad spend currently exceeds gross margin — burn rate is unsustainable at this volume.',
+      type: 'info',
+      text: `RTO impact is ${audit.rtoPct.toFixed(2)}% of orders; COD share is ${audit.codPct.toFixed(2)}%.`,
+    });
+    if (audit.burnRateUnsustainable) {
+      recommendations.push({
+        type: 'warning',
+        text: 'Ad spend currently exceeds gross margin — burn rate is unsustainable at this volume.',
+      });
+    }
+  } else {
+    recommendations.push({
+      type: 'info',
+      text: 'No order data loaded yet — financial metrics (RTO, COD, burn rate) need Shopify order data (CSV upload or live pull) to compute.',
     });
   }
 
@@ -562,7 +799,7 @@ export const runFullAudit = async (
   // genuine audit-methodology caveats — not a second, overlapping issues list.
 
   // ---- Triage: rank leaks by $ impact and flag where to look first ----
-  const rankedLeaks = [...audit.leaks].sort((a, b) => b.amt - a.amt);
+  const rankedLeaks = audit ? [...audit.leaks].sort((a, b) => b.amt - a.amt) : [];
   rankedLeaks.forEach((leak, i) => {
     leak.priority = i < 2 && leak.amt > 0;
   });
@@ -573,11 +810,13 @@ export const runFullAudit = async (
   // computed for them. Now always surfaces the single biggest confirmed $
   // leak regardless of volume; the framing just adjusts for high volume.
   const topLeak = rankedLeaks[0];
-  const volumeNote = topLeak && topLeak.amt > 0
-    ? inputs.totalOrders >= 500
-      ? `High order volume (${inputs.totalOrders} orders) — don't audit product-by-product. Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}), the single largest leak, before anything else.`
-      : `Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}) — the single largest confirmed $ leak in this audit.`
-    : 'No major $ leaks flagged from the confirmed inputs — focus review on tracking coverage and the guided checks below.';
+  const volumeNote = !audit || !inputs
+    ? 'No order data loaded yet — this audit covers tracking evidence only. Load Shopify order data (CSV upload or live pull) to see financial leaks and business metrics.'
+    : topLeak && topLeak.amt > 0
+      ? inputs.totalOrders >= 500
+        ? `High order volume (${inputs.totalOrders} orders) — don't audit product-by-product. Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}), the single largest leak, before anything else.`
+        : `Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}) — the single largest confirmed $ leak in this audit.`
+      : 'No major $ leaks flagged from the confirmed inputs — focus review on tracking coverage and the guided checks below.';
 
   const isCodTypicalMarket = COD_TYPICAL_MARKETS.includes(region);
 
@@ -604,11 +843,20 @@ export const runFullAudit = async (
       missingSignalCount: effective.missingSignalCount,
       blindSpotPct: effective.blindSpotPct,
       cards: [],
+      hasLegacyUa: scan.hasLegacyUa,
+      legacyUaId: scan.legacyUaId,
+      hasPinterestTag: scan.hasPinterestTag,
+      pinterestTagId: scan.pinterestTagId,
+      hasSnapchatPixel: scan.hasSnapchatPixel,
+      snapchatPixelId: scan.snapchatPixelId,
+      hasMicrosoftUet: scan.hasMicrosoftUet,
+      contactSignals: scan.contactSignals,
     },
     deepEvidence,
-    { gtmId: manualGtmId, ga4Id: manualGa4Id }
+    { gtmId: manualGtmId, ga4Id: manualGa4Id },
+    region
   );
-  const topIssuesResult = buildTopIssues(diagnosticReport, audit.leaks, region);
+  const topIssuesResult = buildTopIssues(diagnosticReport, audit ? audit.leaks : [], region, 10, clientReportedCategory || undefined);
 
   // Detailed text findings — replaces the old boxed metric-card grid.
   // Rendered as a plain list in App.tsx, not individual cards.
@@ -645,46 +893,13 @@ export const runFullAudit = async (
     },
   ];
 
-  return {
-    url: storeUrl,
-    score: healthScore,
-    status: 'ok',
-    metrics: {
-      gtmDetected: !!gtmId,
-      gtmId: gtmId || 'Not found',
-      ga4Active: !!ga4Id,
-      ga4Id: ga4Id || 'Not found',
-      metaPixel: effective.metaDetected,
-      tiktokPixel: effective.tiktokDetected,
-      cmpDetected: scan.hasCmp,
-      cmpName: scan.cmpName || 'None',
-      pageSpeed: 'Not measured',
-      sslValid: storeUrl.startsWith('https://'),
-      grossRevenue: audit.grossRevenue,
-      netOutcome: audit.netOutcome,
-      roas: audit.roas,
-      cac: audit.cac,
-    },
-    recommendations,
-    report: {
-      headline: 'Purchase path measurement audit',
-      storeMode: 'Live surface scan',
-      status: signalsFound >= 2 ? 'Core tags detected — validate purchase event next' : 'Tracking gaps found on page load',
-      summary: deepEvidence
-        ? `Scanned the live storefront HTML and combined it with read-only deep-scan network evidence. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok) between the two. This still only confirms what loads on page view — it does not confirm the purchase event fires, which needs a real checkout test or GA4/GTM API access.`
-        : `Scanned the live storefront HTML directly. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok). This confirms what loads on page view — it does not yet confirm the purchase event fires, which needs a real checkout test or GA4/GTM API access. Static HTML alone can miss tags that load dynamically; run the deep scan before auditing for stronger evidence.`,
-      signalSources: {
-        dataLayer: deepEvidence ? (deepEvidence.dataLayerPresent ? 'available' : 'missing') : 'unknown',
-        stape: deepEvidence ? (deepEvidence.trackingSignals.serverSideEndpointCandidates.length > 0 ? 'live' : 'not-present') : 'unknown',
-        purchaseSignals: 'not-validated',
-        consentMode: scan.hasCmp ? 'configured' : 'missing',
-      },
-      evidenceDepth: deepEvidence ? 'static+deep' : 'static-only',
-      signalFindings,
-      scopeNotes,
-      businessMetrics: [
+  // businessMetrics degrades to an honest "Unaccessed" state when no order
+  // data has been loaded — same pattern as Stage 1's locked cards, never a
+  // computed number off inputs that don't exist.
+  const businessMetrics = audit
+    ? [
         { label: 'Gross Revenue', value: formatCurrency(audit.grossRevenue, region), explainer: 'Total order value before any costs are subtracted — your top-line number.' },
-        { label: 'ROAS', value: `${audit.roas.toFixed(2)}x`, explainer: 'For every $1 spent on ads, how many $ came back in revenue — below 1x means ads are losing money outright.' },
+        { label: 'ROAS', value: `${audit.roas.toFixed(2)}x`, explainer: `For every ${formatCurrency(1, region)} spent on ads, how many came back in revenue — below 1x means ads are losing money outright.` },
         { label: 'CAC', value: formatCurrency(audit.cac, region), explainer: 'What it costs in ad spend alone to acquire one new customer.' },
         { label: 'Gross Margin', value: formatCurrency(audit.grossMargin, region), explainer: "What's left after product cost and shipping — before ad spend and other overhead." },
         {
@@ -703,9 +918,68 @@ export const runFullAudit = async (
         },
         { label: 'Settlement Lag (cash locked)', value: formatCurrency(audit.settlementLag, region), explainer: "Cash tied up waiting for COD payments to actually settle — money you've technically earned but can't spend yet." },
         { label: 'Cash Flow Health', value: `${audit.netOutcome >= 0 ? 'Healthy' : 'At Risk'}`, explainer: "Whether gross margin actually covers ad spend — 'At Risk' means you're spending more on ads than you're making before overhead." },
-      ],
+      ]
+    : [
+        { label: 'Gross Revenue', value: 'Unaccessed — load order data to see this', explainer: 'Total order value before any costs are subtracted — your top-line number.' },
+        { label: 'ROAS', value: 'Unaccessed — load order data to see this', explainer: 'For every dollar spent on ads, how many came back in revenue — below 1x means ads are losing money outright.' },
+        { label: 'CAC', value: 'Unaccessed — load order data to see this', explainer: 'What it costs in ad spend alone to acquire one new customer.' },
+        { label: 'Gross Margin', value: 'Unaccessed — load order data to see this', explainer: "What's left after product cost and shipping — before ad spend and other overhead." },
+        { label: 'RTO Rate', value: 'Unaccessed — load order data to see this', explainer: 'Share of orders that came back undelivered.' },
+        { label: 'COD Share', value: 'Unaccessed — load order data to see this', explainer: 'Share of orders paid cash-on-delivery.' },
+        { label: 'Settlement Lag (cash locked)', value: 'Unaccessed — load order data to see this', explainer: "Cash tied up waiting for COD payments to actually settle — money you've technically earned but can't spend yet." },
+        { label: 'Cash Flow Health', value: 'Unaccessed — load order data to see this', explainer: "Whether gross margin actually covers ad spend." },
+      ];
+
+  return {
+    url: storeUrl,
+    score: healthScore,
+    status: 'ok',
+    contactSignals: scan.contactSignals,
+    metrics: {
+      gtmDetected: !!gtmId,
+      gtmId: gtmId || 'Not found',
+      ga4Active: !!ga4Id,
+      ga4Id: ga4Id || 'Not found',
+      metaPixel: effective.metaDetected,
+      metaPixelId: scan.metaPixelId,
+      tiktokPixel: effective.tiktokDetected,
+      tiktokPixelId: scan.tiktokPixelId,
+      cmpDetected: scan.hasCmp,
+      cmpName: scan.cmpName || 'None',
+      hasPinterestTag: scan.hasPinterestTag,
+      pinterestTagId: scan.pinterestTagId,
+      hasSnapchatPixel: scan.hasSnapchatPixel,
+      snapchatPixelId: scan.snapchatPixelId,
+      hasMicrosoftUet: scan.hasMicrosoftUet,
+      pageSpeed: 'Not measured',
+      sslValid: storeUrl.startsWith('https://'),
+      grossRevenue: audit?.grossRevenue ?? 0,
+      netOutcome: audit?.netOutcome ?? 0,
+      roas: audit?.roas ?? 0,
+      cac: audit?.cac ?? 0,
+    },
+    recommendations,
+    report: {
+      headline: 'Purchase path measurement audit',
+      storeMode: 'Live surface scan',
+      status: signalsFound >= 2 ? 'Core tags detected — validate purchase event next' : 'Tracking gaps found on page load',
+      summary: deepEvidence
+        ? `Scanned the live storefront HTML and combined it with read-only deep-scan network evidence. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok) between the two. This still only confirms what loads on page view — it does not confirm the purchase event fires, which needs a real checkout test or GA4/GTM API access.`
+        : `Scanned the live storefront HTML directly. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok). This confirms what loads on page view — it does not yet confirm the purchase event fires, which needs a real checkout test or GA4/GTM API access. Static HTML alone can miss tags that load dynamically; run the deep scan before auditing for stronger evidence.`,
+      signalSources: {
+        dataLayer: deepEvidence ? (deepEvidence.dataLayerPresent ? 'available' : 'missing') : 'unknown',
+        stape: deepEvidence ? (deepEvidence.trackingSignals.serverSideEndpointCandidates.length > 0 ? 'live' : 'not-present') : 'unknown',
+        purchaseSignals: 'not-validated',
+        consentMode: scan.hasCmp ? 'configured' : 'missing',
+      },
+      evidenceDepth: deepEvidence ? 'static+deep' : 'static-only',
+      signalFindings,
+      scopeNotes,
+      businessMetrics,
       topIssues: topIssuesResult,
       volumeNote,
+      clientReportedIssue: clientReportedIssue?.trim() || undefined,
+      clientReportedCategory: clientReportedCategory || undefined,
     },
   };
 };
@@ -721,9 +995,16 @@ function buildFailedResult(storeUrl: string, errorMessage: string): AuditDashboa
       ga4Active: false,
       ga4Id: 'Scan failed',
       metaPixel: false,
+      metaPixelId: null,
       tiktokPixel: false,
+      tiktokPixelId: null,
       cmpDetected: false,
       cmpName: 'N/A',
+      hasPinterestTag: false,
+      pinterestTagId: null,
+      hasSnapchatPixel: false,
+      snapchatPixelId: null,
+      hasMicrosoftUet: false,
       pageSpeed: 'N/A',
       sslValid: false,
       grossRevenue: 0,
@@ -771,7 +1052,6 @@ export const calculateAudit = (inputs: AuditInputs): AuditResults => {
   const rtoLoss = totalOrders > 0 ? (rtoOrders / totalOrders) * grossRevenue : 0;
 
   const codPct = totalOrders > 0 ? (codOrders / totalOrders) * 100 : 0;
-  const codLoss = 0;
 
   const grossMargin = grossRevenue - cogs - shipping;
   const netOutcome = grossMargin - adSpend;
@@ -797,7 +1077,6 @@ export const calculateAudit = (inputs: AuditInputs): AuditResults => {
     rtoPct,
     rtoLoss,
     codPct,
-    codLoss,
     grossRevenue,
     grossMargin,
     netOutcome,
@@ -852,17 +1131,61 @@ export async function fetchLiveShopifyInputs(startDate?: string, endDate?: strin
   const res = await fetch(`${PROXY_BASE}/shopify/orders?${query}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Shopify orders request failed (${res.status})`);
+    throw errorFromResponseBody(body, `Shopify orders request failed (${res.status})`);
   }
   const data = await res.json();
   return shopifyOrdersToAuditInputs(data.orders || []);
+}
+
+export interface ShopifyProductCatalog {
+  total: number;
+  active: number;
+  draft: number;
+  archived: number;
+}
+
+export async function fetchShopifyProductCatalog(): Promise<ShopifyProductCatalog> {
+  const res = await fetch(`${PROXY_BASE}/shopify/products/count`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw errorFromResponseBody(body, `Shopify product count request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+// Same "point, don't dictate" pattern as the order-volume note: a catalog of
+// any size shares one product-page template unless a client has deliberately
+// customized individual products, so per-SKU tracking checks are the wrong
+// amount of work regardless of whether the count is 20 or 20,000 — there's
+// no honest threshold to branch on here, unlike the order-count note.
+export function buildCatalogNote(catalog: ShopifyProductCatalog): string | null {
+  if (catalog.total === 0) return null;
+  const noun = catalog.total === 1 ? 'product' : 'products';
+  const activeNote = catalog.active > 0 ? `${catalog.active} active` : 'none currently active';
+  return `${catalog.total} ${noun} in the catalog (${activeNote}). Don't check tracking product-by-product — confirm it once on a representative product page. Shopify themes share a single product-page template unless a product has been individually customized.`;
+}
+
+export interface Ga4Property {
+  propertyId: string;
+  displayName: string;
+  accountName: string;
+}
+
+export async function fetchGa4Properties(): Promise<Ga4Property[]> {
+  const res = await fetch(`${PROXY_BASE}/ga4/properties`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw errorFromResponseBody(body, `GA4 properties request failed (${res.status})`);
+  }
+  const data = await res.json();
+  return data.properties || [];
 }
 
 export async function fetchGa4LiveReport(propertyId: string, startDate: string, endDate: string): Promise<Ga4LiveMetrics> {
   const res = await fetch(`${PROXY_BASE}/ga4/report?propertyId=${encodeURIComponent(propertyId)}&startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `GA4 report request failed (${res.status})`);
+    throw errorFromResponseBody(body, `GA4 report request failed (${res.status})`);
   }
   const data = await res.json();
   const row = data.rows?.[0]?.metricValues || [];
@@ -879,7 +1202,7 @@ export async function fetchGtmContainerMatch(gtmId: string | null): Promise<{ ma
   const res = await fetch(`${PROXY_BASE}/gtm/containers`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `GTM containers request failed (${res.status})`);
+    throw errorFromResponseBody(body, `GTM containers request failed (${res.status})`);
   }
   const data = await res.json();
   const containers = data.containers || [];
@@ -966,6 +1289,9 @@ export interface DeepScanResult {
     gtmRequests: number;
     metaBrowserRequests: number;
     tiktokBrowserRequests: number;
+    pinterestBrowserRequests: number;
+    snapchatBrowserRequests: number;
+    microsoftUetBrowserRequests: number;
     serverSideEndpointCandidates: string[];
   };
   observedIds: { ga4: string[]; gtm: string[] };
@@ -976,37 +1302,117 @@ export async function fetchDeepScan(storeUrl: string): Promise<DeepScanResult> {
   const res = await fetch(`${PROXY_BASE}/scan/deep?url=${encodeURIComponent(storeUrl)}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Deep scan request failed (${res.status})`);
+    throw errorFromResponseBody(body, `Deep scan request failed (${res.status})`);
   }
   return res.json();
 }
 
-export function buildReportHtml(scanResult: AuditDashboardResult): string {
-  return `<html><body style="font-family:sans-serif;padding:24px">
+// Shared by both PDF exports so the contact block can't drift between them
+// — one place to update the name/email/phone/payment line, not two.
+const CONTACT_FOOTER_HTML = `
+    <hr style="margin-top:28px;border:none;border-top:1px solid #334155" />
+    <p style="text-align:center;color:#94a3b8;font-size:0.8em;margin-top:12px">Prepared by JSONalytics™</p>
+    <p style="text-align:center;font-size:1em;font-weight:700;color:#f8fafc;margin-top:12px">Jason <span style="color:#94a3b8;font-size:0.78em;font-weight:600">(preferred name)</span></p>
+    <p style="text-align:center;font-size:1.15em;font-weight:800;color:#b45309;margin-top:2px">jagjit@jsonalytics.com</p>
+    <p style="text-align:center;font-size:1em;font-weight:700;color:#f8fafc;margin-top:4px">WhatsApp: +91-8588006657</p>
+    <p style="text-align:center;font-size:0.8em;color:#94a3b8;margin-top:6px">US account via Wise — universally accepted, easy international payment.</p>
+    <p style="text-align:center;font-size:0.8em;color:#94a3b8;margin-top:4px">Ownership declaration available upon request.</p>`;
+
+export function buildReportHtml(scanResult: AuditDashboardResult, region: Region = 'US'): string {
+  return `<html><body style="font-family:sans-serif;padding:24px;background:#0f172a;color:#f8fafc">
     <h1>${escapeHtml(scanResult.report.headline)}</h1>
-    <p style="color:#666;font-size:0.85em">Evidence: ${scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML + read-only deep scan' : 'static HTML only'}</p>
+    <p style="color:#94a3b8;font-size:0.85em">Evidence: ${scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML + read-only deep scan' : 'static HTML only'}</p>
     <p>${escapeHtml(scanResult.report.summary)}</p>
+    ${scanResult.report.clientReportedIssue
+      ? `<p style="background:#1e293b;border-left:4px solid #e8792c;padding:8px 12px;color:#f8fafc">Client reported: "${escapeHtml(scanResult.report.clientReportedIssue)}" — not independently verified, shown as context for this audit.</p>`
+      : ''}
     <h3>Top Issues${scanResult.report.topIssues.totalFound > scanResult.report.topIssues.issues.length ? ` (top ${scanResult.report.topIssues.issues.length} of ${scanResult.report.topIssues.totalFound} found)` : ''}</h3>
+    <!-- Deliberately no "first check" hint here — this PDF is the pre-sale
+         Report deliverable; the fix steps belong in the Validation PDF,
+         after the client is actually paying. Split into Confirmed/Worth
+         Confirming (same partitionEdgeCases split as the on-screen Report
+         and Stage 2's own Top Issues view) so the confidence gap between a
+         measured finding and a low-confidence one reads clearly on the
+         page itself, without needing a call to explain it. -->
     ${scanResult.report.topIssues.issues.length === 0
       ? '<p>No confirmed issues from the evidence gathered for this audit.</p>'
-      : `<ol>${scanResult.report.topIssues.issues
-          .map((i) => `<li><b>${escapeHtml(i.title)}</b> (${escapeHtml(i.severity)})${i.amount ? ` — $${Math.round(i.amount).toLocaleString()}` : ''}: ${escapeHtml(i.detail)} <i>First check: ${escapeHtml(i.firstCheck)}</i></li>`)
-          .join('')}</ol>`
+      : (() => {
+          const issueRow = (i: typeof scanResult.report.topIssues.issues[number]) =>
+            `<li><b>${escapeHtml(i.title)}</b> (${escapeHtml(i.severity)})${i.amount ? ` — ${escapeHtml(formatCurrency(i.amount, region))}` : ''}: ${escapeHtml(i.detail)}</li>`;
+          const confirmed = scanResult.report.topIssues.issues.filter((i) => !i.possibleReasons || i.possibleReasons.length === 0);
+          const worthConfirming = scanResult.report.topIssues.issues.filter((i) => i.possibleReasons && i.possibleReasons.length > 0);
+          return `
+            ${confirmed.length > 0 ? `<p style="font-size:0.85em;font-weight:bold;color:#f8fafc;margin-bottom:4px">CONFIRMED</p><ol>${confirmed.map(issueRow).join('')}</ol>` : ''}
+            ${worthConfirming.length > 0 ? `<p style="font-size:0.85em;font-weight:bold;color:#b45309;margin:14px 0 2px">WORTH CONFIRMING</p><p style="font-size:0.8em;color:#94a3b8;margin:0 0 4px">Evidence points here, but more than one real-world cause is possible from outside evidence alone.</p><ol>${worthConfirming.map(issueRow).join('')}</ol>` : ''}
+          `;
+        })()
     }
     <h3>Signal Findings</h3>
     <ul>${scanResult.report.signalFindings
       .map((f) => `<li>${escapeHtml(f.label)}: ${escapeHtml(f.value)}${f.note ? ` — ${escapeHtml(f.note)}` : ''}</li>`)
       .join('')}</ul>
-    <h3>Business Metrics</h3>
-    <ul>${scanResult.report.businessMetrics
-      .map((m) => `<li>${escapeHtml(m.label)}: ${escapeHtml(m.value)}</li>`)
-      .join('')}</ul>
+    <h3>Financial Calculator</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:0.92em;margin-bottom:8px">
+      ${scanResult.report.businessMetrics
+        .map((m) => {
+          const isSubtotal = m.label === 'Gross Margin' || m.label === 'Cash Flow Health';
+          return `<tr style="border-bottom:1px solid #334155;${isSubtotal ? 'font-weight:bold;background:#1e293b' : ''}">
+            <td style="padding:8px 10px;color:#94a3b8">${escapeHtml(m.label)}</td>
+            <td style="padding:8px 10px;text-align:right;white-space:nowrap;color:#f8fafc">${escapeHtml(m.value)}</td>
+          </tr>
+          <tr><td colspan="2" style="padding:0 10px 8px;color:#94a3b8;font-size:0.82em">${escapeHtml(m.explainer)}</td></tr>`;
+        })
+        .join('')}
+    </table>
     <h3>Audit Scope &amp; Limitations</h3>
     <ul>${scanResult.report.scopeNotes
       .map((i) => `<li><b>${escapeHtml(i.category)}</b>: ${escapeHtml(i.statement)}</li>`)
       .join('')}</ul>
     <h3>Recommendations</h3>
     <ul>${scanResult.recommendations.map((r) => `<li>${escapeHtml(r.text)}</li>`).join('')}</ul>
+    ${CONTACT_FOOTER_HTML}
+  </body></html>`;
+}
+
+/**
+ * The Validation PDF — deliberately NOT buildReportHtml reused with
+ * different data. Validation's whole point (explicit user definition:
+ * "report shows what's broken, validation shows what's been fixed") is the
+ * diff, not a flat findings list, so it needs its own shape: resolved
+ * issues get the operator's own typed technical-steps note (paying-client
+ * depth, never auto-generated), still-open issues stay hedged the same way
+ * the app always hedges, and a fixed warning up top protects the fix's
+ * accuracy against changes the operator never made and can't be
+ * responsible for.
+ */
+export function buildValidationReportHtml(
+  result: AuditDashboardResult,
+  diff: { resolved: TopIssue[]; stillOpen: TopIssue[]; newlyFound: TopIssue[] },
+  techStepNotes: Record<string, string>
+): string {
+  return `<html><body style="font-family:sans-serif;padding:24px;background:#0f172a;color:#f8fafc">
+    <h1>What's Been Fixed</h1>
+    <p style="color:#94a3b8;font-size:0.85em">${escapeHtml(result.url)} — validated ${escapeHtml(new Date().toLocaleString())}</p>
+    <p style="background:#1e293b;border-left:4px solid #e8792c;padding:10px 12px;color:#f8fafc;font-size:0.9em">
+      To keep this accurate going forward: please don't modify the tracking setup covered in this report. Any other change to the store — installing a new app, a platform or theme update, a redesign — can affect tracking independently of this fix and may need a fresh check; that's outside the scope of what's validated here.
+    </p>
+    <h3>Resolved (${diff.resolved.length})</h3>
+    ${diff.resolved.length === 0
+      ? '<p>Nothing resolved yet compared to the original report.</p>'
+      : `<ol>${diff.resolved
+          .map((i) => `<li><b>${escapeHtml(i.title)}</b> — no longer detected.${techStepNotes[i.id]?.trim() ? `<br/><i>Technical steps taken: ${escapeHtml(techStepNotes[i.id].trim())}</i>` : ''}</li>`)
+          .join('')}</ol>`
+    }
+    <h3>Still Open (${diff.stillOpen.length})</h3>
+    ${diff.stillOpen.length === 0
+      ? '<p>Everything from the original report is resolved.</p>'
+      : `<ol>${diff.stillOpen.map((i) => `<li><b>${escapeHtml(i.title)}:</b> ${escapeHtml(i.detail)} <i>First check: ${escapeHtml(i.firstCheck)}</i></li>`).join('')}</ol>`
+    }
+    ${diff.newlyFound.length > 0
+      ? `<h3>New since the original report (${diff.newlyFound.length})</h3><ol>${diff.newlyFound.map((i) => `<li><b>${escapeHtml(i.title)}:</b> ${escapeHtml(i.detail)}</li>`).join('')}</ol>`
+      : ''
+    }
+    ${CONTACT_FOOTER_HTML}
   </body></html>`;
 }
 
@@ -1018,7 +1424,7 @@ export async function exportReportPdf(reportHtml: string): Promise<Blob> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `PDF export failed (${res.status})`);
+    throw errorFromResponseBody(body, `PDF export failed (${res.status})`);
   }
   return res.blob();
 }

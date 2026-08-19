@@ -11,7 +11,7 @@ function baseDeep(overrides: Partial<DeepScanResult> = {}): DeepScanResult {
     consent: { found: false, raw: null },
     trackingRequestsSeen: [],
     eventEvidence: [],
-    trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, serverSideEndpointCandidates: [] },
+    trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] },
     observedIds: { ga4: [], gtm: [] },
     note: '',
     ...overrides,

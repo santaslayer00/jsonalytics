@@ -14,11 +14,14 @@ test('all four CRUD routes exist for the lead register', () => {
   assert.match(server, /app\.delete\('\/api\/leads\/:id'/);
 });
 
-test('lead status is restricted to exactly the four required states', () => {
+test('lead status is restricted to exactly the required outreach states', () => {
+  // Redesigned 2026-08-15 around actual use: this is a churn register, not
+  // a generic pipeline — 'in_queue' renamed to 'not_contacted', 'contacted'
+  // added as the real next step in the funnel.
   const match = server.match(/const LEAD_STATUSES = \[([^\]]+)\]/);
   assert.ok(match, 'expected a LEAD_STATUSES constant');
   const statuses = match[1].split(',').map((s) => s.trim().replace(/'/g, ''));
-  assert.deepEqual(statuses.sort(), ['in_progress', 'in_queue', 'interested', 'not_interested'].sort());
+  assert.deepEqual(statuses.sort(), ['contacted', 'in_progress', 'interested', 'not_contacted', 'not_interested'].sort());
 });
 
 test('POST and PATCH both validate status against LEAD_STATUSES rather than trusting the request body', () => {

@@ -39,3 +39,12 @@ test('detectRegionFromUrl maps a .ca domain to Canada, not UAE (dropped market)'
   assert.equal(detectRegionFromUrl('https://mystore.co.uk'), 'UK');
   assert.equal(detectRegionFromUrl('https://mystore.in'), 'IN');
 });
+
+test('detectRegionFromUrl returns null (not a fake US default) when there is no real signal — so callers never clobber a manual region pick', () => {
+  // .com/.us/.net/.org are real US signals by design (see constants.ts) —
+  // a bare .myshopify.com subdomain still ends in .com, so that's a real
+  // detected US match too, not a "no signal" case. Use a TLD outside every
+  // region's list to test the genuine no-signal path.
+  assert.equal(detectRegionFromUrl('https://mystore.io'), null);
+  assert.equal(detectRegionFromUrl('not a url'), null);
+});

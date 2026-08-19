@@ -7,6 +7,7 @@
     "dev": "vite",
     "server": "node server.cjs",
     "dev:all": "node scripts/dev.cjs",
+    "benchmark": "node --experimental-strip-types scripts/record-scan-benchmark.mts",
     "test": "node --test tests/*.test.cjs tests/*.test.ts",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

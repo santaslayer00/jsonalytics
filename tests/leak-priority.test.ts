@@ -54,3 +54,22 @@ test('no confirmed leaks -> an honest "nothing flagged" note, not silence', asyn
     assert.match(result.report.volumeNote!, /No major \$ leaks flagged/);
   });
 });
+
+// CSV/live order data is optional to run the audit — only the PDF export
+// mandates it (enforced in App.tsx, not here). null inputs must still
+// produce a full tracking-diagnostic audit, just with financial output
+// honestly degraded to "Unaccessed" instead of computed off nothing.
+test('null inputs (no CSV/live pull loaded) -> tracking-only audit runs fine, financial metrics stay honestly unaccessed, no fabricated leaks', async () => {
+  await withMockedScanFetch('<html><body>no tracking here</body></html>', async () => {
+    const result = await runFullAudit('https://example.com', null, 'GTM-TEST123', null, 'US');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.report.topIssues.issues.some((i) => i.category === 'financial'), false, 'no financial leaks should be fabricated from missing inputs');
+    for (const metric of result.report.businessMetrics) {
+      assert.match(metric.value, /Unaccessed/, `${metric.label} should stay honestly unaccessed with no order data`);
+    }
+    assert.match(result.report.volumeNote!, /No order data loaded yet/);
+    assert.equal(result.metrics.grossRevenue, 0);
+    // Tracking diagnostics must still be real and unaffected by missing financial data.
+    assert.equal(result.metrics.gtmId, 'GTM-TEST123');
+  });
+});

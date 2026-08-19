@@ -1,11 +1,12 @@
-export type LeadStatus = 'interested' | 'not_interested' | 'in_queue' | 'in_progress';
+export type LeadStatus = 'not_contacted' | 'contacted' | 'interested' | 'not_interested' | 'in_progress';
 
-export const LEAD_STATUSES: LeadStatus[] = ['interested', 'not_interested', 'in_queue', 'in_progress'];
+export const LEAD_STATUSES: LeadStatus[] = ['not_contacted', 'contacted', 'interested', 'not_interested', 'in_progress'];
 
 export const LEAD_STATUS_LABELS: Record<LeadStatus, string> = {
+  not_contacted: 'Not contacted',
+  contacted: 'Contacted',
   interested: 'Interested',
   not_interested: 'Not interested',
-  in_queue: 'In queue',
   in_progress: 'In progress',
 };
 
@@ -15,6 +16,8 @@ export interface LeadScanCache {
   scannedAt: string; // ISO timestamp
   surfaceResult: SurfaceAuditResult;
   deepScan: DeepScanResult | null;
+  /** Finding ids from this scan's diagnostic report (e.g. 'no-cmp-with-active-tags'), excluding info-only/all-clear findings — the searchable "common cause" keywords for this lead. */
+  causeTags?: string[];
 }
 
 export interface Lead {
@@ -43,7 +46,7 @@ export async function fetchLeads(): Promise<Lead[]> {
   return body.leads || [];
 }
 
-export async function createLead(storeUrl: string, status: LeadStatus = 'in_queue', storeName = ''): Promise<Lead> {
+export async function createLead(storeUrl: string, status: LeadStatus = 'not_contacted', storeName = ''): Promise<Lead> {
   const res = await fetch(`${PROXY_BASE}/leads`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

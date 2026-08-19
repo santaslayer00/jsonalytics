@@ -45,6 +45,19 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '5mb' }));
 
+// Live request log for manual testing sessions — deliberately minimal (no
+// full body/header dump, so OAuth tokens/codes never hit the console) so it
+// stays safe to leave on while watching real UI clicks turn into real
+// backend calls.
+app.use((req, res, next) => {
+  const target = req.query?.url || req.body?.storeUrl || '';
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}${target ? ` (${target})` : ''} -> ${res.statusCode} (${Date.now() - start}ms)`);
+  });
+  next();
+});
+
 const path = require('path');
 const TOKENS_FILE = path.join(__dirname, 'tokens.json');
 
@@ -53,7 +66,7 @@ function loadTokens() {
     const data = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8'));
     return data;
   } catch {
-    return { ga4: null, gtm: null };
+    return { ga4: null, gtm: null, shopify: null };
   }
 }
 
@@ -66,7 +79,7 @@ function saveTokens(tokens) {
 // trail. "Lean" per the product philosophy — this tracks operator intent
 // (who to follow up with), not scan evidence.
 const LEADS_FILE = path.join(__dirname, 'leads.json');
-const LEAD_STATUSES = ['interested', 'not_interested', 'in_queue', 'in_progress'];
+const LEAD_STATUSES = ['not_contacted', 'contacted', 'interested', 'not_interested', 'in_progress'];
 
 function loadLeads() {
   try {
@@ -87,8 +100,11 @@ const {
   SHOPIFY_STORE_DOMAIN,
   SHOPIFY_CLIENT_ID,
   SHOPIFY_CLIENT_SECRET,
-  SHOPIFY_ACCESS_TOKEN, // optional: set this if you're using a custom app static token
+  SHOPIFY_REDIRECT_URI, // e.g. http://localhost:4000/api/shopify/callback — must also be registered as an allowed redirect URL in the app's dev-dashboard configuration
+  SHOPIFY_ACCESS_TOKEN, // optional: set this if you have a static custom-app token instead of using the OAuth flow below
+  SHOPIFY_API_VERSION, // optional override — Shopify releases a new quarterly version (YYYY-01/04/07/10); each is supported ~12 months, so this needs bumping periodically. One place to change instead of hunting every admin/api/ URL.
 } = process.env;
+const shopifyApiVersion = SHOPIFY_API_VERSION || '2026-07';
 
 const oauth2Client = new OAuth2Client(
   process.env.GA4_CLIENT_ID,
@@ -105,6 +121,8 @@ const gtmOauth2Client = new OAuth2Client(
 const savedTokens = loadTokens();
 let ga4Tokens = savedTokens.ga4;
 let gtmTokens = savedTokens.gtm;
+let shopifyTokens = savedTokens.shopify; // { access_token, scope } — Shopify Admin API tokens from this flow don't expire, no refresh needed
+let shopifyOauthState = null; // single-operator local app: one in-memory nonce is enough CSRF protection, no session store needed
 
 if (ga4Tokens) oauth2Client.setCredentials(ga4Tokens);
 if (gtmTokens) gtmOauth2Client.setCredentials(gtmTokens);
@@ -116,11 +134,11 @@ if (gtmTokens) gtmOauth2Client.setCredentials(gtmTokens);
 // that don't return a new one (only the first authorization does).
 oauth2Client.on('tokens', (tokens) => {
   ga4Tokens = { ...ga4Tokens, ...tokens };
-  saveTokens({ ga4: ga4Tokens, gtm: gtmTokens });
+  saveTokens({ ga4: ga4Tokens, gtm: gtmTokens, shopify: shopifyTokens });
 });
 gtmOauth2Client.on('tokens', (tokens) => {
   gtmTokens = { ...gtmTokens, ...tokens };
-  saveTokens({ ga4: ga4Tokens, gtm: gtmTokens });
+  saveTokens({ ga4: ga4Tokens, gtm: gtmTokens, shopify: shopifyTokens });
 });
 
 // ---- Storefront HTML scan (Tab 1 - No Access) ----
@@ -190,7 +208,16 @@ app.get('/api/scan/deep', async (req, res) => {
     await page.setRequestInterception(true);
     page.on('request', async (r) => {
       const u = r.url();
-      if (/google-analytics\.com|analytics\.google\.com|googletagmanager\.com|facebook\.com\/tr|tiktok\.com\/i18n\/pixel|collect\?/.test(u)) {
+      // Broadened beyond the well-known tracking domains to also catch
+      // custom-domain server-side (sGTM/Stape) proxies — a real gap: the
+      // whole point of server-side tracking is often a first-party domain
+      // that doesn't look like a tracking request at all (e.g.
+      // "sgtm.storename.com"), so requiring one of the known-vendor
+      // hostnames would silently miss it unless "collect?" also happened
+      // to be in the path. Now also captures anything naming
+      // stape/sgtm/server-side explicitly, or the Measurement Protocol
+      // paths (/g/collect, /mp/collect) regardless of domain.
+      if (/google-analytics\.com|analytics\.google\.com|googletagmanager\.com|facebook\.com\/tr|tiktok\.com\/i18n\/pixel|collect\?|stape\.io|sgtm|server-side|\/g\/collect|\/mp\/collect/i.test(u)) {
         capturedRequests.push(u);
       }
       if (r.isNavigationRequest() && r.frame() === page.mainFrame()) {
@@ -238,9 +265,26 @@ app.get('/api/scan/deep', async (req, res) => {
       const ecommerce = entry?.ecommerce;
       return [{ event, ecommerceFields: ecommerce && typeof ecommerce === 'object' ? Object.keys(ecommerce) : [], evidence: 'observed-on-page-load' }];
     });
+    // The actual signal for "server-side tracking" is a domain that ISN'T
+    // one of the well-known vendor domains — that's the whole point of
+    // server-side tracking, routing collection through a first-party/
+    // custom domain to avoid ad-blockers and ITP. Matching on "/g/collect"
+    // or "/collect?" alone (the previous behavior) caught legitimate
+    // Google/DoubleClick requests that just happen to share that path
+    // convention — confirmed live on drinkzyn.com and treatyjewellery.com,
+    // where analytics.google.com/doubleclick.net/merchant-center-analytics
+    // domains were being mislabeled as "server-side candidates" alongside
+    // a genuinely custom one (treatyjewellery.com's own
+    // "cantstopme.treatyjewellery.com" subdomain). Excluding the known
+    // vendor domains leaves only the domains actually worth flagging.
+    const KNOWN_TRACKING_VENDOR_HOSTS = /(^|\.)(google-analytics\.com|analytics\.google\.com|googletagmanager\.com|doubleclick\.net|google\.com|googlesyndication\.com|merchant-center-analytics\.goog|facebook\.com|facebook\.net|tiktok\.com|pinimg\.com|sc-static\.net|snapchat\.com|bing\.com)$/i;
     const serverSideEndpointCandidates = [...new Set(capturedRequests
-      .filter((u) => /stape|sgtm|server-side|\/g\/collect|\/collect\?/i.test(u))
-      .map((u) => new URL(u).origin))];
+      .filter((u) => /stape\.io|sgtm|server-side|\/g\/collect|\/mp\/collect|\/collect\?/i.test(u))
+      .map((u) => new URL(u).origin)
+      .filter((origin) => !KNOWN_TRACKING_VENDOR_HOSTS.test(new URL(origin).hostname)))];
+    if (serverSideEndpointCandidates.length > 0) {
+      console.log(`[${new Date().toISOString()}] [sGTM] server-side endpoint detected for ${target}: ${serverSideEndpointCandidates.join(', ')}`);
+    }
 
     // Reconciliation evidence: measurement/container IDs actually seen firing
     // in network requests, as opposed to IDs merely present in static HTML.
@@ -275,6 +319,9 @@ app.get('/api/scan/deep', async (req, res) => {
         gtmRequests: capturedRequests.filter((u) => /googletagmanager\.com\/gtm\.js/i.test(u)).length,
         metaBrowserRequests: capturedRequests.filter((u) => /facebook\.com\/tr/i.test(u)).length,
         tiktokBrowserRequests: capturedRequests.filter((u) => /tiktok\.com\/i18n\/pixel/i.test(u)).length,
+        pinterestBrowserRequests: capturedRequests.filter((u) => /s\.pinimg\.com/i.test(u)).length,
+        snapchatBrowserRequests: capturedRequests.filter((u) => /sc-static\.net|tr\.snapchat\.com/i.test(u)).length,
+        microsoftUetBrowserRequests: capturedRequests.filter((u) => /bat\.bing\.com/i.test(u)).length,
         serverSideEndpointCandidates,
       },
       observedIds: { ga4: observedGa4Ids, gtm: observedGtmIds },
@@ -311,46 +358,21 @@ app.post('/api/report/pdf', async (req, res) => {
 });
 
 // ---- Shopify Admin API (Tab 2 - With Access) ----
-let cachedToken = null;
-let tokenExpiresAt = 0;
-
 async function getShopifyAccessToken() {
-  // If a static custom-app access token is supplied, use it directly —
-  // most real-world "with access" setups use this, not the OAuth
-  // client_credentials exchange below (which Shopify does not support
-  // for the standard Admin API flow).
+  // A static custom-app token, if supplied, wins — some setups still have
+  // one. Otherwise use whatever the real OAuth flow below (/api/shopify/auth
+  // -> /api/shopify/callback) obtained and persisted to tokens.json. There
+  // is no client_credentials fallback here anymore — confirmed via live
+  // testing this session that Shopify's Admin API rejects that grant type
+  // outright (a Cloudflare challenge page, not a Shopify error), so a
+  // fallback that can never succeed was worse than no fallback at all.
   if (SHOPIFY_ACCESS_TOKEN) {
     return SHOPIFY_ACCESS_TOKEN;
   }
-
-  if (!SHOPIFY_STORE_DOMAIN || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
-    throw new Error('Missing Shopify credentials in .env — set SHOPIFY_ACCESS_TOKEN (custom app token, recommended) or SHOPIFY_STORE_DOMAIN/SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET');
+  if (shopifyTokens?.access_token) {
+    return shopifyTokens.access_token;
   }
-
-  if (cachedToken && Date.now() < tokenExpiresAt - 60000) {
-    return cachedToken;
-  }
-
-  const tokenRes = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: SHOPIFY_CLIENT_ID,
-      client_secret: SHOPIFY_CLIENT_SECRET,
-      grant_type: 'client_credentials',
-    }),
-  });
-
-  if (!tokenRes.ok) {
-    const detail = await tokenRes.text();
-    throw new Error(`Shopify token request failed (${tokenRes.status}): ${detail}. If this is a custom app, set SHOPIFY_ACCESS_TOKEN instead of using this OAuth flow.`);
-  }
-
-  const tokenData = await tokenRes.json();
-  cachedToken = tokenData.access_token;
-  tokenExpiresAt = Date.now() + (tokenData.expires_in ? tokenData.expires_in * 1000 : 24 * 60 * 60 * 1000);
-
-  return cachedToken;
+  throw new Error('Shopify is not connected yet — visit /api/shopify/auth first, or set SHOPIFY_ACCESS_TOKEN in .env if you have a static custom-app token.');
 }
 
 app.get('/api/shopify/orders', async (req, res) => {
@@ -362,7 +384,7 @@ app.get('/api/shopify/orders', async (req, res) => {
     const params = new URLSearchParams({ status: 'any', limit: '250' });
     if (startDate) params.set('created_at_min', `${startDate}T00:00:00Z`);
     if (endDate) params.set('created_at_max', `${endDate}T23:59:59Z`);
-    let nextUrl = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2026-01/orders.json?${params}`;
+    let nextUrl = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${shopifyApiVersion}/orders.json?${params}`;
     const orders = [];
     let pageCount = 0;
     while (nextUrl) {
@@ -396,6 +418,108 @@ app.get('/api/shopify/orders', async (req, res) => {
   }
 });
 
+app.get('/api/shopify/products/count', async (req, res) => {
+  try {
+    const token = await getShopifyAccessToken();
+    // Count-only, not a catalog pull: three lightweight requests regardless
+    // of catalog size (10 products or 100,000), so this is safe to run
+    // automatically without a rate-limit or timeout concern. Summing
+    // active+draft+archived explicitly rather than relying on the
+    // no-status-param default, which is undocumented behavior.
+    const statuses = ['active', 'draft', 'archived'];
+    const counts = await Promise.all(statuses.map(async (status) => {
+      const countRes = await fetchWithRateLimitRetry(
+        `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${shopifyApiVersion}/products/count.json?status=${status}`,
+        { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+      );
+      if (!countRes.ok) throw new Error(`Shopify product count request failed (${countRes.status})`);
+      const data = await countRes.json();
+      return [status, data.count || 0];
+    }));
+    const byStatus = Object.fromEntries(counts);
+    const total = byStatus.active + byStatus.draft + byStatus.archived;
+    res.json({ total, active: byStatus.active, draft: byStatus.draft, archived: byStatus.archived });
+  } catch (err) {
+    res.status(502).json({ error: 'Could not fetch Shopify product count', detail: err.message });
+  }
+});
+
+// ---- Shopify OAuth (Tab 2 - With Access) ----
+// Standard Shopify authorization-code flow — the only grant type that
+// actually works for this Admin API (see getShopifyAccessToken's comment).
+// Mirrors the GA4/GTM OAuth pattern directly below: /auth redirects to the
+// provider's approval screen, /callback exchanges the returned code for a
+// token and persists it to tokens.json.
+app.get('/api/shopify/auth', (req, res) => {
+  if (!SHOPIFY_STORE_DOMAIN || !SHOPIFY_CLIENT_ID || !SHOPIFY_REDIRECT_URI) {
+    return res.status(500).send('Missing SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID, or SHOPIFY_REDIRECT_URI in .env.');
+  }
+  shopifyOauthState = crypto.randomBytes(16).toString('hex');
+  const params = new URLSearchParams({
+    client_id: SHOPIFY_CLIENT_ID,
+    // read_orders alone caps accessible order history at the last 60 days —
+    // there's no self-service scope to lift that (Shopify requires a
+    // Protected Customer Data review to get extended order history, not a
+    // scope string an app can just request). Disclosed honestly in the
+    // scope notes rather than silently claiming "any date range" works.
+    scope: 'read_orders,read_products',
+    redirect_uri: SHOPIFY_REDIRECT_URI,
+    state: shopifyOauthState,
+  });
+  res.redirect(`https://${SHOPIFY_STORE_DOMAIN}/admin/oauth/authorize?${params}`);
+});
+
+app.get('/api/shopify/callback', async (req, res) => {
+  const { code, state, shop, hmac } = req.query;
+
+  // CSRF guard: state must match what /auth generated for this session.
+  if (!state || state !== shopifyOauthState) {
+    return res.status(403).send('Shopify auth failed: state mismatch. Start over at /api/shopify/auth.');
+  }
+  shopifyOauthState = null; // one-time use
+
+  // Confirm this callback is for the store this app is actually configured
+  // for, not a forged request naming a different shop.
+  if (shop && shop !== SHOPIFY_STORE_DOMAIN) {
+    return res.status(403).send(`Shopify auth failed: callback was for ${shop}, not the configured ${SHOPIFY_STORE_DOMAIN}.`);
+  }
+
+  // HMAC guard: Shopify signs every callback with SHOPIFY_CLIENT_SECRET —
+  // verifying it proves this request genuinely came from Shopify.
+  if (hmac) {
+    const message = Object.keys(req.query)
+      .filter((key) => key !== 'hmac' && key !== 'signature')
+      .sort()
+      .map((key) => `${key}=${req.query[key]}`)
+      .join('&');
+    const computed = crypto.createHmac('sha256', SHOPIFY_CLIENT_SECRET).update(message).digest('hex');
+    const computedBuf = Buffer.from(computed, 'utf8');
+    const receivedBuf = Buffer.from(String(hmac), 'utf8');
+    if (computedBuf.length !== receivedBuf.length || !crypto.timingSafeEqual(computedBuf, receivedBuf)) {
+      return res.status(403).send('Shopify auth failed: HMAC verification failed.');
+    }
+  }
+
+  try {
+    const tokenRes = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: SHOPIFY_CLIENT_ID, client_secret: SHOPIFY_CLIENT_SECRET, code }),
+    });
+    if (!tokenRes.ok) {
+      const detail = await tokenRes.text();
+      return res.status(502).send(`Shopify token exchange failed (${tokenRes.status}): ${detail}`);
+    }
+    const tokenData = await tokenRes.json();
+    shopifyTokens = { access_token: tokenData.access_token, scope: tokenData.scope };
+    saveTokens({ ga4: ga4Tokens, gtm: gtmTokens, shopify: shopifyTokens });
+    res.send('Shopify connected! You can close this tab.');
+  } catch (err) {
+    console.error('Shopify auth error:', err);
+    res.status(500).send('Shopify auth failed');
+  }
+});
+
 // ---- GA4 OAuth (Tab 2 - With Access) ----
 app.get('/api/ga4/auth', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
@@ -415,11 +539,38 @@ app.get('/api/ga4/callback', async (req, res) => {
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
     ga4Tokens = tokens;
-    saveTokens({ ga4: ga4Tokens, gtm: gtmTokens });
+    saveTokens({ ga4: ga4Tokens, gtm: gtmTokens, shopify: shopifyTokens });
     res.send('GA4 connected! You can close this tab.');
   } catch (err) {
     console.error('GA4 auth error:', err);
     res.status(500).send('GA4 auth failed');
+  }
+});
+
+// Lists every GA4 property the connected Google account can see — not
+// scoped to one store. Uses the Analytics Admin API, which the existing
+// analytics.readonly scope already covers (no new consent screen needed).
+// Only surfaces properties already shared with this account; it can't
+// discover a property nobody's granted access to.
+app.get('/api/ga4/properties', async (req, res) => {
+  if (!ga4Tokens) return res.status(401).json({ error: 'GA4 not connected yet — visit /api/ga4/auth first' });
+  try {
+    oauth2Client.setCredentials(ga4Tokens);
+    const response = await oauth2Client.request({
+      url: 'https://analyticsadmin.googleapis.com/v1beta/accountSummaries',
+      method: 'GET',
+    });
+    const properties = (response.data.accountSummaries || []).flatMap((account) =>
+      (account.propertySummaries || []).map((prop) => ({
+        propertyId: (prop.property || '').replace('properties/', ''),
+        displayName: prop.displayName || prop.property,
+        accountName: account.displayName || '',
+      }))
+    );
+    res.json({ properties });
+  } catch (err) {
+    console.error('GA4 properties list error:', err.message);
+    res.status(500).json({ error: 'Could not list GA4 properties', detail: err.message });
   }
 });
 
@@ -466,7 +617,7 @@ app.get('/api/gtm/callback', async (req, res) => {
   try {
     const { tokens } = await gtmOauth2Client.getToken(code);
     gtmTokens = tokens;
-    saveTokens({ ga4: ga4Tokens, gtm: gtmTokens });
+    saveTokens({ ga4: ga4Tokens, gtm: gtmTokens, shopify: shopifyTokens });
     res.send('GTM connected! You can close this tab.');
   } catch (err) {
     console.error('GTM auth error:', err);
@@ -498,7 +649,10 @@ app.get('/api/gtm/containers', async (req, res) => {
 });
 
 app.get('/api/status', (_req, res) => {
-  res.json({ ga4: { connected: Boolean(ga4Tokens) }, gtm: { connected: Boolean(gtmTokens) }, shopify: { configured: Boolean(SHOPIFY_STORE_DOMAIN && (SHOPIFY_ACCESS_TOKEN || (SHOPIFY_CLIENT_ID && SHOPIFY_CLIENT_SECRET))) } });
+  // "configured" means real access exists (static token or completed OAuth)
+  // — not just that client_id/secret are present, which proved misleading:
+  // an app can have valid-looking credentials and still not be installed.
+  res.json({ ga4: { connected: Boolean(ga4Tokens) }, gtm: { connected: Boolean(gtmTokens) }, shopify: { configured: Boolean(SHOPIFY_STORE_DOMAIN && (SHOPIFY_ACCESS_TOKEN || shopifyTokens?.access_token)) } });
 });
 
 app.get('/api/gtm/inspect', async (req, res) => {
@@ -534,7 +688,7 @@ app.post('/api/leads', (req, res) => {
     id: crypto.randomUUID(),
     storeUrl: storeUrl.trim(),
     storeName: typeof storeName === 'string' ? storeName.trim() : '',
-    status: status || 'in_queue',
+    status: status || 'not_contacted',
     notes: typeof notes === 'string' ? notes : '',
     createdAt: now,
     updatedAt: now,

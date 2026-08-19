@@ -75,12 +75,17 @@ export const isSameStoreUrl = (deepScanUrl: string, targetUrl: string): boolean 
   normalizeUrlForCompare(deepScanUrl) === normalizeUrlForCompare(targetUrl);
 
 /**
- * Detects the most likely region from a URL.
+ * Detects the most likely region from a URL's TLD. Returns null when there's
+ * no real signal (invalid URL, or a domain like *.myshopify.com with no
+ * country-code TLD) — callers should leave the current region alone in that
+ * case, not silently force a default. A previous version defaulted to 'US'
+ * here, which meant auto-wiring this to the region selector would have
+ * clobbered a manual non-US pick every time someone typed in the URL field.
  */
-export const detectRegionFromUrl = (url: string): Region => {
+export const detectRegionFromUrl = (url: string): Region | null => {
   try {
     const hostname = new URL(url.startsWith('http') ? url : `https://${url}`).hostname.toLowerCase();
-    
+
     for (const region of Object.values(REGIONS)) {
       if (region.tlds.some(tld => hostname.endsWith(tld))) {
         return region.code;
@@ -89,5 +94,5 @@ export const detectRegionFromUrl = (url: string): Region => {
   } catch {
     // Invalid URL, ignore detection
   }
-  return 'US'; // Default to US
+  return null;
 };

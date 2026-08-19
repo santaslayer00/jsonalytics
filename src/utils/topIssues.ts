@@ -25,6 +25,7 @@
 import type { DiagnosticReport, DiagnosticSeverity } from './diagnosticEngine';
 import type { LeakItem } from './auditLogic';
 import type { Region } from './constants';
+import { formatCurrency } from './formatters.ts';
 
 export type TopIssueCategory = 'tracking' | 'financial' | 'compliance' | 'manual';
 
@@ -36,6 +37,18 @@ export interface TopIssue {
   detail: string;
   firstCheck: string;
   amount?: number; // $ amount, for financial issues only
+  // Locate — carried across from DiagnosticFinding for tracking-category
+  // issues only; financial/manual issues never had this evidence tier and
+  // stay undefined rather than getting a fabricated one.
+  observed?: string[];
+  doesNotProve?: string;
+  // Whether stronger evidence (a deep scan) exists but hasn't been pulled
+  // in yet — the basis for the "Missing / where to find it" block. Carried
+  // across the same way as the other Locate fields.
+  requiresDeepScan?: boolean;
+  // Guide — same source. Undefined means "no distinct candidate causes for
+  // this one," not "no guidance" (firstCheck/detail still apply either way).
+  possibleReasons?: Array<{ cause: string; howToCheck: string }>;
 }
 
 export interface TopIssuesResult {
@@ -61,7 +74,12 @@ export function buildTopIssues(
   diagnostic: DiagnosticReport,
   leaks: LeakItem[],
   region: Region,
-  cap = 10
+  cap = 10,
+  // Narrows toward what the client actually reported, without letting a
+  // guess override real evidence: severity still decides rank first — this
+  // only breaks ties WITHIN the same severity tier, so a guessed-wrong
+  // category can never bury a genuinely more severe finding.
+  boostCategory?: TopIssueCategory
 ): TopIssuesResult {
   const issues: TopIssue[] = [];
 
@@ -78,6 +96,10 @@ export function buildTopIssues(
       title: f.title,
       detail: f.proves,
       firstCheck: f.firstCheck,
+      observed: f.observed,
+      doesNotProve: f.doesNotProve,
+      requiresDeepScan: f.requiresDeepScan,
+      possibleReasons: f.possibleReasons,
     });
   }
 
@@ -117,6 +139,10 @@ export function buildTopIssues(
   issues.sort((a, b) => {
     const rankDiff = SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity];
     if (rankDiff !== 0) return rankDiff;
+    if (boostCategory) {
+      const boostDiff = (b.category === boostCategory ? 1 : 0) - (a.category === boostCategory ? 1 : 0);
+      if (boostDiff !== 0) return boostDiff;
+    }
     return (b.amount || 0) - (a.amount || 0);
   });
 
@@ -129,6 +155,98 @@ export function buildTopIssues(
   }
 
   return { issues: capped, totalFound: issues.length };
+}
+
+/**
+ * Splits a ranked issues list into confident "Top Issues" (one clear cause,
+ * one clear check — duplicate containers, ID mismatches, financial leaks,
+ * confirmed manual-check failures) vs "Edge Cases" (genuinely ambiguous —
+ * multiple candidate causes, some possibly outside what this scan can see
+ * at all, like a Custom Pixels sandbox). possibleReasons being populated IS
+ * the signal for "edge case" — that field only ever gets set on findings
+ * where the diagnostic engine itself couldn't narrow to one cause, so this
+ * reuses a real distinction already made upstream instead of inventing a
+ * new classification here.
+ */
+export function partitionEdgeCases(issues: TopIssue[]): { topIssues: TopIssue[]; edgeCases: TopIssue[] } {
+  const topIssues: TopIssue[] = [];
+  const edgeCases: TopIssue[] = [];
+  for (const issue of issues) {
+    (issue.possibleReasons && issue.possibleReasons.length > 0 ? edgeCases : topIssues).push(issue);
+  }
+  return { topIssues, edgeCases };
+}
+
+/**
+ * The Client Report's Validation tab, precisely: "report shows what's
+ * broken, validation shows what all has been fixed" (explicit user
+ * definition, 2026-08-15). A raw re-scan alone only answers "what's wrong
+ * today" — it takes a diff against the original to answer "did the fix
+ * work." Matches by `id`, which is stable across separate scan runs for
+ * the same underlying cause (a rule id like 'no-cmp-with-active-tags', or a
+ * leak id like 'leak-rto-returns' — never a random per-instance value), so
+ * "resolved" means the exact same finding is genuinely gone, not relabeled.
+ */
+export function diffTopIssues(before: TopIssuesResult, after: TopIssuesResult): { resolved: TopIssue[]; stillOpen: TopIssue[]; newlyFound: TopIssue[] } {
+  const beforeIds = new Set(before.issues.map((i) => i.id));
+  const afterIds = new Set(after.issues.map((i) => i.id));
+  return {
+    resolved: before.issues.filter((i) => !afterIds.has(i.id)),
+    stillOpen: after.issues.filter((i) => beforeIds.has(i.id)),
+    newlyFound: after.issues.filter((i) => !beforeIds.has(i.id)),
+  };
+}
+
+// Tracking findings where a wrong/duplicate/missing measurement ID is
+// plausibly, directly connected to a revenue-reporting gap — not every
+// tracking finding qualifies (no-cmp-with-active-tags or legacy-ua-present
+// have nothing to do with revenue accuracy). Kept as an explicit allowlist
+// rather than "any tracking finding" so this never overreaches into a
+// finding the reconciliation number has no real relationship to.
+const REVENUE_RELEVANT_FINDING_IDS = new Set([
+  'ga4-id-mismatch',
+  'duplicate-gtm-containers',
+  'gtm-declared-not-observed',
+  'ga4-declared-not-observed',
+  'manual-gtm-mismatch',
+  'manual-ga4-mismatch',
+]);
+
+/**
+ * Attaches the REAL, measured GA4-vs-Shopify revenue gap (not an invented
+ * benchmark or estimated percentage) to the small set of tracking findings
+ * a wrong/duplicate/missing measurement ID could plausibly explain. Only
+ * fires when both revenue figures are real, confirmed numbers — never
+ * computed on a pre-sale/no-access Report, since that's the one case this
+ * data genuinely doesn't exist yet. Post-hoc on an already-ranked,
+ * already-capped TopIssuesResult (called after buildTopIssues), so it never
+ * reorders or re-selects which issues made the top 10 — it only enriches
+ * ones already there with a real dollar figure where one now exists.
+ *
+ * Deliberately keeps the same hedge language already used in
+ * reconcileLiveApiEvidence (date range / refunds / attribution timing can
+ * also explain a gap) — a real measured number is still not proof this
+ * specific finding caused all of it, and the text has to say so every time
+ * it appears, not just the first time this gap is mentioned elsewhere.
+ */
+export function attachRevenueImpact(topIssues: TopIssuesResult, ga4Revenue: number, shopifyRevenue: number, region: Region): TopIssuesResult {
+  if (!(ga4Revenue > 0) || !(shopifyRevenue > 0)) return topIssues; // no real data to compute from — leave untouched, never estimate
+
+  const diffAmount = Math.abs(ga4Revenue - shopifyRevenue);
+  if (diffAmount === 0) return topIssues; // numbers already reconcile — nothing to attach
+
+  const diffPct = ((ga4Revenue - shopifyRevenue) / shopifyRevenue) * 100;
+  const sign = diffPct >= 0 ? '+' : '';
+  const hedgeSentence = ` In this audit, GA4-reported revenue differs from your confirmed Shopify revenue by ${formatCurrency(diffAmount, region)} (${sign}${diffPct.toFixed(0)}%) for this window — only a fair comparison if both used the same date range, and refunds/attribution timing can also explain a gap, so this isn't proof this finding alone caused it.`;
+
+  return {
+    ...topIssues,
+    issues: topIssues.issues.map((issue) =>
+      REVENUE_RELEVANT_FINDING_IDS.has(issue.id)
+        ? { ...issue, amount: diffAmount, detail: issue.detail + hedgeSentence }
+        : issue
+    ),
+  };
 }
 
 /**
