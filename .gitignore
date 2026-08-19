@@ -27,4 +27,4 @@ tokens.json
 leads.json
 
 # Local Claude Code tool-permission settings — machine-specific, not app code
-.claude/settings.local.json
+.claude/
