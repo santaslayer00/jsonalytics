@@ -188,7 +188,6 @@ function ClientReportView({ result, topIssues, badge }: { result: AuditDashboard
         <h1 style={{ margin: '6px 0', fontSize: '1.6rem' }}>Store Measurement &amp; Business Audit</h1>
         <div style={{ color: '#94a3b8', fontSize: '0.9rem' }}>{result.url}</div>
       </div>
-      <p style={{ lineHeight: 1.55, color: '#f8fafc' }}>{result.report.summary}</p>
       <h3 style={{ marginTop: '22px' }}>Confirmed business metrics</h3>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
         {result.report.businessMetrics.map((metric: { label: string; value: string; explainer: string }, i: number) => (
@@ -287,7 +286,9 @@ export default function App() {
   const [region, setRegion] = useState<Region>('US');
 
   // ---- Tab 1: No Access ----
-  const [surfaceUrl, setSurfaceUrl] = useState('');
+  // Shares `storeUrl` (declared below, under Tab 2) with Deep Scan and With
+  // Access on purpose — one store, entered once, regardless of which tab's
+  // scan logic and results (kept fully separate) you run against it.
   const [isSurfaceScanning, setIsSurfaceScanning] = useState(false);
   const [surfaceResult, setSurfaceResult] = useState<SurfaceAuditResult | null>(null);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
@@ -426,14 +427,19 @@ export default function App() {
   // evidence alone.
   const handleSurfaceScan = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!surfaceUrl) return;
+    if (!storeUrl) return;
     setIsSurfaceScanning(true);
     setSurfaceResult(null);
     setSurfaceError(null);
     try {
-      const result = await runSurfaceAudit(surfaceUrl, region);
+      const result = await runSurfaceAudit(storeUrl, region);
       setSurfaceResult(result);
       if (result.status === 'error') setSurfaceError(result.error || 'Scan failed.');
+      // Kick off the Deep Scan tab's full diagnostic in the background too
+      // — not awaited, so this button's own "Scanning..." state reflects
+      // just the surface half; the Deep Scan tab tracks its own progress
+      // via isScanning and just has results waiting once it finishes.
+      else void runDeepDiagnostic();
     } catch (err: any) {
       setSurfaceError(err.message || 'Scan failed unexpectedly.');
     } finally {
@@ -485,14 +491,19 @@ export default function App() {
   // Full Audit tab now — Stage 1 is the region-blind, screenshot-friendly
   // ice-breaker and no longer renders diagnostic detail at all.
 
-  // Static HTML evidence only — Stage 1 has no deep scan to blend in
-  // anymore. Reused by handleContinueToFullAudit below — the detected
-  // GTM/GA4 ID is exactly the "logic applied" allowed to carry forward to
-  // stage 2, where a real deep scan can confirm or correct it.
+  // Blends in the same-URL deep scan once it resolves (it's kicked off
+  // automatically by handleSurfaceScan) so Stage 1's headline numbers don't
+  // sit on a false "signal missing" verdict for stores that track fine via
+  // client-side JS static HTML can't see — real false negative confirmed
+  // live against gymshark.com. Stage 1's layout stays exactly as simple as
+  // before (no added Locate+Point+Guide detail); only the evidence feeding
+  // the existing cards changes. Reused by handleContinueToFullAudit below —
+  // the detected GTM/GA4 ID is exactly the "logic applied" allowed to carry
+  // forward to stage 2, where a real deep scan can confirm or correct it.
   const effectiveSurfaceSignals = useMemo(() => {
     if (!surfaceResult || surfaceResult.status !== 'ok') return null;
-    return resolveEffectiveSignals(surfaceResult, null);
-  }, [surfaceResult]);
+    return resolveEffectiveSignals(surfaceResult, validAuditDeepScan);
+  }, [surfaceResult, validAuditDeepScan]);
   const enrichedCards = useMemo(() => {
     if (!surfaceResult || surfaceResult.status !== 'ok' || !effectiveSurfaceSignals) return [];
     return buildSurfaceCards(effectiveSurfaceSignals, surfaceResult.hasCmp, surfaceResult.cmpName, region);
@@ -577,6 +588,14 @@ export default function App() {
 
   const handleScan = async (e: React.FormEvent) => {
     e.preventDefault();
+    await runDeepDiagnostic();
+  };
+
+  // Shared by the Deep Scan tab's button AND the No Access tab's surface
+  // scan — one URL submission now runs both, so the Deep Scan tab just
+  // displays whatever's already there instead of needing its own manual
+  // trigger. The button stays too, purely as a manual re-run.
+  const runDeepDiagnostic = async () => {
     if (!storeUrl) return;
 
     // CSV/live order data — and its financial confirmation fields — are
@@ -930,8 +949,6 @@ export default function App() {
             <span style={{ backgroundColor: '#0f172a', border: '1px solid #334155', padding: '6px 12px', borderRadius: '999px', color: '#f8fafc', fontSize: '0.8rem' }}>{scanResult.report.storeMode}</span>
           </div>
 
-          <div style={{ marginBottom: '1rem', color: '#94a3b8' }}>{scanResult.report.summary}</div>
-
           <details style={{ marginBottom: '1rem' }}>
             <summary style={{ cursor: 'pointer', fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Evidence sources</summary>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '8px' }}>
@@ -1122,8 +1139,8 @@ export default function App() {
                     <input
                       type="text"
                       placeholder="Enter store URL (e.g., mystore.myshopify.com)"
-                      value={surfaceUrl}
-                      onChange={(e) => applyUrlAndDetectRegion(e.target.value, setSurfaceUrl)}
+                      value={storeUrl}
+                      onChange={(e) => applyUrlAndDetectRegion(e.target.value, setStoreUrl)}
                       style={{ flex: 5, minWidth: '320px', padding: '10px 12px', backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', color: '#f8fafc', fontSize: '0.9rem', outline: 'none' }}
                     />
                     <button
@@ -1210,11 +1227,11 @@ export default function App() {
                       </div>
 
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '10px', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                        <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '0.2px', textTransform: 'uppercase' }}>Not an Agency.</div>
+                        <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '0.2px', textTransform: 'uppercase' }}>Not an Agency.</div>
                         <div style={{ textAlign: 'right' }}>
-                          <div style={{ color: '#f8fafc', fontSize: '0.9rem', fontWeight: 700 }}>Jason <span style={{ color: '#94a3b8', fontSize: '0.72rem', fontWeight: 600 }}>(preferred name)</span></div>
-                          <div style={{ color: '#94a3b8', fontSize: '1.15rem', fontWeight: 600, marginTop: '2px' }}>jagjit@jsonalytics.com</div>
-                          <div style={{ color: '#f8fafc', fontSize: '0.9rem', fontWeight: 600, marginTop: '2px' }}>WhatsApp: +91-8588006657</div>
+                          <div style={{ color: '#f8fafc', fontSize: '0.72rem', fontWeight: 700 }}>Jason <span style={{ color: '#94a3b8', fontSize: '0.6rem', fontWeight: 600 }}>(preferred name)</span></div>
+                          <div style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: 600, marginTop: '2px' }}>jagjit@jsonalytics.com</div>
+                          <div style={{ color: '#f8fafc', fontSize: '0.72rem', fontWeight: 600, marginTop: '2px' }}>WhatsApp: +91-8588006657</div>
                         </div>
                       </div>
 
@@ -1232,22 +1249,15 @@ export default function App() {
                     <h2 style={{ fontSize: '0.95rem', margin: 0 }}>Deep Scan — Audit, Locate, Point, Guide</h2>
                   </div>
 
-                  <form onSubmit={handleScan} style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
-                    <input
-                      type="text"
-                      placeholder="Enter store URL (e.g., mystore.myshopify.com)"
-                      value={storeUrl}
-                      onChange={(e) => applyUrlAndDetectRegion(e.target.value, setStoreUrl)}
-                      style={{ flex: 5, minWidth: '320px', padding: '10px 12px', backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', color: '#f8fafc', fontSize: '0.9rem', outline: 'none' }}
-                    />
-                    <button
-                      type="submit"
-                      disabled={isScanning}
-                      style={{ backgroundColor: '#b45309', color: '#f8fafc', border: 'none', padding: '0 20px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', fontSize: '0.9rem' }}
-                    >
-                      {isScanning ? 'Scanning...' : 'Deep Scan'}
-                    </button>
-                  </form>
+                  {/* Pure visual — no input, no button. Scanning starts
+                      automatically from the No Access tab's submission;
+                      this tab only ever displays whatever's already there. */}
+                  {isScanning && (
+                    <div style={{ marginBottom: '10px', color: '#94a3b8', fontSize: '0.85rem' }}>Scanning...</div>
+                  )}
+                  {!isScanning && !scanResult && !scanError && (
+                    <div style={{ marginBottom: '10px', color: '#64748b', fontSize: '0.85rem' }}>No scan yet — enter a URL on the No Access tab.</div>
+                  )}
                   {scanError && (
                     <div style={{ marginBottom: '10px', color: '#e8792c', fontSize: '0.82rem', backgroundColor: 'rgba(232,121,44,0.08)', border: '1px solid rgba(232,121,44,0.3)', borderRadius: '8px', padding: '10px 14px' }}>
                       Error: {scanError}

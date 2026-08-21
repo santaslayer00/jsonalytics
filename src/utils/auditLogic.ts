@@ -98,6 +98,8 @@ export interface AuditDashboardResult {
     hasSnapchatPixel: boolean;
     snapchatPixelId: string | null;
     hasMicrosoftUet: boolean;
+    hasGoogleAdsConversion: boolean;
+    googleAdsConversionId: string | null;
     pageSpeed: string;
     sslValid: boolean;
     grossRevenue: number;
@@ -179,6 +181,8 @@ export interface SurfaceAuditResult {
   hasSnapchatPixel: boolean;
   snapchatPixelId: string | null;
   hasMicrosoftUet: boolean;
+  hasGoogleAdsConversion: boolean;
+  googleAdsConversionId: string | null;
   // Public research starting points for reaching the actual decision-maker
   // instead of a generic inbox — deliberately limited to what the store's
   // own public page already publishes (social links, a mailto:, a link to
@@ -329,6 +333,8 @@ async function scanStoreHtml(storeUrl: string): Promise<{
   hasSnapchatPixel: boolean;
   snapchatPixelId: string | null;
   hasMicrosoftUet: boolean;
+  hasGoogleAdsConversion: boolean;
+  googleAdsConversionId: string | null;
   contactSignals: SurfaceAuditResult['contactSignals'];
 }> {
   const res = await fetch(`${PROXY_BASE}/scan?url=${encodeURIComponent(storeUrl)}`);
@@ -376,6 +382,13 @@ async function scanStoreHtml(storeUrl: string): Promise<{
   const hasSnapchatPixel = /snaptr\s*\(\s*['"]init['"]/.test(html) || /sc-static\.net\/scevent\.min\.js/.test(html);
   const snapchatPixelMatch = html.match(/snaptr\(\s*['"]init['"]\s*,\s*['"]([\w-]+)['"]/);
   const hasMicrosoftUet = /\buetq\b/.test(html) || /bat\.bing\.com\/bat\.js/.test(html);
+  // Google Ads conversion tag — what the "Google & YouTube" Shopify app and
+  // manual Google Ads setups actually use for purchase conversion tracking.
+  // Distinct from GTM (GTM-xxxxx) and GA4 (G-xxxxxxxxxx): this is an AW-xxxxxxxxx
+  // ID, so a store can have zero GTM/GA4 signal and still be tracking Google Ads
+  // purchases through this alone — false negative otherwise.
+  const hasGoogleAdsConversion = /AW-\d{9,11}/.test(html) || /googleadservices\.com\/pagead\/conversion/.test(html);
+  const googleAdsConversionMatch = html.match(/AW-\d{9,11}/);
   const contactSignals = extractContactSignals(html);
 
   return {
@@ -396,6 +409,8 @@ async function scanStoreHtml(storeUrl: string): Promise<{
     hasSnapchatPixel,
     snapchatPixelId: snapchatPixelMatch ? snapchatPixelMatch[1] : null,
     hasMicrosoftUet,
+    hasGoogleAdsConversion,
+    googleAdsConversionId: googleAdsConversionMatch ? googleAdsConversionMatch[0] : null,
     contactSignals,
   };
 }
@@ -608,6 +623,8 @@ export const runSurfaceAudit = async (
       hasSnapchatPixel: false,
       snapchatPixelId: null,
       hasMicrosoftUet: false,
+      hasGoogleAdsConversion: false,
+      googleAdsConversionId: null,
       contactSignals: { socialLinks: [], contactEmail: null, aboutOrContactPageUrl: null },
     };
   }
@@ -643,6 +660,8 @@ export const runSurfaceAudit = async (
     hasSnapchatPixel: scan.hasSnapchatPixel,
     snapchatPixelId: scan.snapchatPixelId,
     hasMicrosoftUet: scan.hasMicrosoftUet,
+    hasGoogleAdsConversion: scan.hasGoogleAdsConversion,
+    googleAdsConversionId: scan.googleAdsConversionId,
     contactSignals: scan.contactSignals,
   };
 };
@@ -735,6 +754,9 @@ export const runFullAudit = async (
   }
   if (scan.hasMicrosoftUet) {
     recommendations.push({ type: 'success', text: 'Microsoft Ads (UET) tag detected.' });
+  }
+  if (scan.hasGoogleAdsConversion) {
+    recommendations.push({ type: 'success', text: `Google Ads conversion tag detected${scan.googleAdsConversionId ? ` (${scan.googleAdsConversionId})` : ''} — commonly set up via the "Google & YouTube" app, separate from GTM/GA4.` });
   }
   if (scan.hasLegacyUa) {
     recommendations.push({ type: 'info', text: `Legacy Universal Analytics snippet still present (${scan.legacyUaId}) — stopped collecting data in July 2023, safe to remove, but adds noise when auditing what's actually tracking.` });
@@ -850,6 +872,8 @@ export const runFullAudit = async (
       hasSnapchatPixel: scan.hasSnapchatPixel,
       snapchatPixelId: scan.snapchatPixelId,
       hasMicrosoftUet: scan.hasMicrosoftUet,
+      hasGoogleAdsConversion: scan.hasGoogleAdsConversion,
+      googleAdsConversionId: scan.googleAdsConversionId,
       contactSignals: scan.contactSignals,
     },
     deepEvidence,
@@ -951,6 +975,8 @@ export const runFullAudit = async (
       hasSnapchatPixel: scan.hasSnapchatPixel,
       snapchatPixelId: scan.snapchatPixelId,
       hasMicrosoftUet: scan.hasMicrosoftUet,
+      hasGoogleAdsConversion: scan.hasGoogleAdsConversion,
+      googleAdsConversionId: scan.googleAdsConversionId,
       pageSpeed: 'Not measured',
       sslValid: storeUrl.startsWith('https://'),
       grossRevenue: audit?.grossRevenue ?? 0,
@@ -963,9 +989,12 @@ export const runFullAudit = async (
       headline: 'Purchase path measurement audit',
       storeMode: 'Live surface scan',
       status: signalsFound >= 2 ? 'Core tags detected — validate purchase event next' : 'Tracking gaps found on page load',
+      // Evidence caveats (purchase-event proof, static-scan blind spots) live in
+      // scopeNotes below ("Runtime data layer" / "Measurement source trust") —
+      // this summary states what was scanned and found, not a second copy of them.
       summary: deepEvidence
-        ? `Scanned the live storefront HTML and combined it with read-only deep-scan network evidence. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok) between the two. This still only confirms what loads on page view — it does not confirm the purchase event fires, which needs a real checkout test or GA4/GTM API access.`
-        : `Scanned the live storefront HTML directly. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok). This confirms what loads on page view — it does not yet confirm the purchase event fires, which needs a real checkout test or GA4/GTM API access. Static HTML alone can miss tags that load dynamically; run the deep scan before auditing for stronger evidence.`,
+        ? `Scanned the live storefront HTML and combined it with read-only deep-scan network evidence. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok).`
+        : `Scanned the live storefront HTML directly. Found ${signalsFound} of 4 tracking signatures (GTM, GA4, Meta, TikTok).`,
       signalSources: {
         dataLayer: deepEvidence ? (deepEvidence.dataLayerPresent ? 'available' : 'missing') : 'unknown',
         stape: deepEvidence ? (deepEvidence.trackingSignals.serverSideEndpointCandidates.length > 0 ? 'live' : 'not-present') : 'unknown',
@@ -1005,6 +1034,8 @@ function buildFailedResult(storeUrl: string, errorMessage: string): AuditDashboa
       hasSnapchatPixel: false,
       snapchatPixelId: null,
       hasMicrosoftUet: false,
+      hasGoogleAdsConversion: false,
+      googleAdsConversionId: null,
       pageSpeed: 'N/A',
       sslValid: false,
       grossRevenue: 0,
@@ -1322,7 +1353,6 @@ export function buildReportHtml(scanResult: AuditDashboardResult, region: Region
   return `<html><body style="font-family:sans-serif;padding:24px;background:#0f172a;color:#f8fafc">
     <h1>${escapeHtml(scanResult.report.headline)}</h1>
     <p style="color:#94a3b8;font-size:0.85em">Evidence: ${scanResult.report.evidenceDepth === 'static+deep' ? 'static HTML + read-only deep scan' : 'static HTML only'}</p>
-    <p>${escapeHtml(scanResult.report.summary)}</p>
     ${scanResult.report.clientReportedIssue
       ? `<p style="background:#1e293b;border-left:4px solid #e8792c;padding:8px 12px;color:#f8fafc">Client reported: "${escapeHtml(scanResult.report.clientReportedIssue)}" — not independently verified, shown as context for this audit.</p>`
       : ''}
