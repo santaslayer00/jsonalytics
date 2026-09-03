@@ -273,10 +273,10 @@ export function mergeManualFindings(base: TopIssuesResult, manualResults: Manual
     id: `manual-${m.id}`,
     category: 'manual',
     severity: 'critical',
-    title: `${m.title} — failed manual verification`,
+    title: `${m.title}, failed manual verification`,
     detail: m.note
       ? `Operator-confirmed via ${m.where}: ${m.note}`
-      : `Operator-confirmed failure via ${m.where} — direct human verification, the strongest evidence tier this app has.`,
+      : `Operator-confirmed failure via ${m.where}, direct human verification, the strongest evidence tier this app has.`,
     firstCheck: `Fix, then re-verify in ${m.where} before re-auditing.`,
   }));
 

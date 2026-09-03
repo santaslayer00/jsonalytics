@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  runSurfaceAudit,
   runFullAudit,
   fetchLiveShopifyInputs,
   fetchGa4LiveReport,
@@ -13,8 +12,8 @@ import {
   buildValidationReportHtml,
   exportReportPdf,
 } from './utils/auditLogic';
-import type { AuditInputs, AuditDashboardResult, DeepScanResult, Ga4Property, ShopifyProductCatalog, SurfaceAuditResult } from './utils/auditLogic';
-import { resolveEffectiveSignals, buildSurfaceCards, reconcileLiveApiEvidence } from './utils/auditLogic';
+import type { AuditInputs, AuditDashboardResult, DeepScanResult, Ga4Property, ShopifyProductCatalog } from './utils/auditLogic';
+import { reconcileLiveApiEvidence } from './utils/auditLogic';
 import { mergeManualFindings, partitionEdgeCases, diffTopIssues, attachRevenueImpact } from './utils/topIssues';
 import type { ManualCheckResult, TopIssueCategory, TopIssue, TopIssuesResult } from './utils/topIssues';
 import type { DiagnosticSeverity } from './utils/diagnosticEngine';
@@ -25,9 +24,12 @@ import { REGIONS } from './utils/constants';
 import type { Region } from './utils/constants';
 import { formatCurrency, isSameStoreUrl, detectRegionFromUrl } from './utils/formatters';
 
+// Severity no longer carries a distinct color (everything's white/gray now)
+// — the signal moves to weight and size instead, critical/high read as
+// bigger and bolder than medium/low/info, not as a different hue.
 const severityColor: Record<DiagnosticSeverity, string> = {
-  critical: '#e8792c',
-  high: '#e8792c',
+  critical: '#f8fafc',
+  high: '#f8fafc',
   medium: '#94a3b8',
   low: '#94a3b8',
   info: '#94a3b8',
@@ -38,6 +40,20 @@ const severityLabel: Record<DiagnosticSeverity, string> = {
   medium: 'MEDIUM',
   low: 'LOW',
   info: 'CLEAR',
+};
+const severityWeight: Record<DiagnosticSeverity, number> = {
+  critical: 900,
+  high: 800,
+  medium: 700,
+  low: 600,
+  info: 500,
+};
+const severitySize: Record<DiagnosticSeverity, string> = {
+  critical: '0.95rem',
+  high: '0.88rem',
+  medium: '0.8rem',
+  low: '0.8rem',
+  info: '0.8rem',
 };
 
 // Whether the operator has actually confirmed everything CSV/live order
@@ -63,8 +79,8 @@ function isFinancialConfirmationComplete(
 
 // Locate+Point (light: what was found, what it proves, the one first check)
 // vs Guide (heavy: every candidate cause paired with its own check) as two
-// tabs, not one wall of text — used on both Stage 1's POINT TO FIRST panel
-// and Stage 2's Top Issues list, so a finding reads the same way everywhere
+// tabs, not one wall of text, used across every findings list so a
+// finding reads the same way everywhere
 // it appears. A module-level component (not defined inside App) because it
 // owns its own tab state via useState.
 interface FindingDetailData {
@@ -103,43 +119,53 @@ function FindingDetail({ finding, accentColor, hasDeepScan }: { finding: Finding
       </div>
       {tab === 'locate' && (
         <div>
-          {finding.observed && finding.observed.length > 0 && (
-            <div style={{ marginBottom: '10px' }}>
-              <div style={{ fontSize: '0.68rem', color: '#94a3b8', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>Observed</div>
-              <div style={{ fontSize: '0.9rem', color: '#f8fafc', lineHeight: 1.6 }}>{finding.observed.join(' ')}</div>
-            </div>
-          )}
-          <div style={{ marginBottom: '10px' }}>
-            <div style={{ fontSize: '0.68rem', color: '#94a3b8', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>Proves</div>
-            <div style={{ fontSize: '0.9rem', color: '#94a3b8', lineHeight: 1.6 }}>{finding.proves}</div>
-          </div>
-          {finding.doesNotProve && (
-            <div style={{ marginBottom: '10px' }}>
-              <div style={{ fontSize: '0.68rem', color: '#94a3b8', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>Does not prove</div>
-              <div style={{ fontSize: '0.85rem', color: '#94a3b8', lineHeight: 1.6 }}>{finding.doesNotProve}</div>
-            </div>
-          )}
+          {/* To the point: one plain-language line, no Observed/Proves/Does-
+              not-prove labels breaking it into a wall of headed sections.
+              The full evidence trail moves to Guide, which is meant to be
+              the elaborate version. */}
+          <div style={{ marginBottom: '10px', fontSize: '0.88rem', color: '#94a3b8', lineHeight: 1.6 }}>{finding.proves}</div>
           {missingDeepScan && (
-            <div style={{ marginBottom: '10px', backgroundColor: 'rgba(180,83,9,0.08)', border: '1px solid rgba(180,83,9,0.3)', borderRadius: '8px', padding: '10px 14px' }}>
-              <div style={{ fontSize: '0.68rem', color: '#b45309', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>Missing</div>
-              <div style={{ fontSize: '0.88rem', color: '#f8fafc', lineHeight: 1.6 }}>Deep-scan network evidence (real requests, dataLayer, consent signals) — this conclusion is based on the page source alone.</div>
-              <div style={{ fontSize: '0.82rem', color: '#b45309', marginTop: '6px' }}>Where to find it: run the Deep Scan (button above) — it doesn't need re-entering anything.</div>
+            <div style={{ marginBottom: '10px', backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '10px 14px' }}>
+              <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>Missing</div>
+              <div style={{ fontSize: '0.88rem', color: '#f8fafc', lineHeight: 1.6 }}>Deep-scan network evidence (real requests, dataLayer, consent signals). This conclusion is based on the page source alone.</div>
             </div>
           )}
-          <div style={{ backgroundColor: `${accentColor}11`, border: `1px solid ${accentColor}44`, borderRadius: '8px', padding: '12px 14px' }}>
-            <div style={{ fontSize: '0.68rem', color: accentColor, letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>First check</div>
-            <div style={{ fontSize: '0.92rem', color: '#e8792c', lineHeight: 1.6, fontWeight: 500 }}>{finding.firstCheck}</div>
+          <div style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '12px 14px' }}>
+            <div style={{ fontSize: '0.8rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>First check</div>
+            <div style={{ fontSize: '0.95rem', color: '#f8fafc', lineHeight: 1.6, fontWeight: 700 }}>{finding.firstCheck}</div>
           </div>
         </div>
       )}
       {tab === 'guide' && hasGuide && (
-        <div style={{ display: 'grid', gap: '12px' }}>
-          {finding.possibleReasons!.map((r, i) => (
-            <div key={i} style={{ fontSize: '0.9rem', color: '#94a3b8', lineHeight: 1.6, borderLeft: '3px solid #334155', paddingLeft: '14px' }}>
-              <div style={{ color: '#f8fafc' }}>{i + 1}. {r.cause}</div>
-              <div style={{ color: '#e8792c', marginTop: '4px' }}>{r.howToCheck}</div>
+        <div>
+          {/* Elaborate: the full evidence trail lives here instead of the
+              compact Locate view — what was actually observed, and the
+              explicit boundary of what it doesn't prove, before getting
+              into each individual possible cause. */}
+          {finding.observed && finding.observed.length > 0 && (
+            <div style={{ marginBottom: '12px' }}>
+              <div style={{ fontSize: '0.68rem', color: '#94a3b8', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '4px' }}>Observed</div>
+              <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '0.88rem', color: '#f8fafc', lineHeight: 1.6 }}>
+                {finding.observed.map((point, i) => (
+                  <li key={i} style={{ marginBottom: i < finding.observed!.length - 1 ? '4px' : 0 }}>{point}</li>
+                ))}
+              </ul>
             </div>
-          ))}
+          )}
+          {finding.doesNotProve && (
+            <div style={{ marginBottom: '12px', fontSize: '0.85rem', color: '#94a3b8', lineHeight: 1.6 }}>
+              <span style={{ fontSize: '0.68rem', color: '#94a3b8', letterSpacing: '1px', textTransform: 'uppercase', marginRight: '6px' }}>Does not prove:</span>
+              {finding.doesNotProve}
+            </div>
+          )}
+          <div style={{ display: 'grid', gap: '12px' }}>
+            {finding.possibleReasons!.map((r, i) => (
+              <div key={i} style={{ fontSize: '0.9rem', color: '#94a3b8', lineHeight: 1.6, borderLeft: '3px solid #334155', paddingLeft: '14px' }}>
+                <div style={{ color: '#f8fafc', fontWeight: 700 }}>{i + 1}. {r.cause}</div>
+                <div style={{ color: '#f8fafc', marginTop: '4px' }}>{r.howToCheck}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -153,8 +179,8 @@ function IssueRow({ issue, index, isLast, region, hasDeepScan }: { issue: TopIss
   return (
     <div style={{ fontSize: '0.8rem', borderLeft: `3px solid ${severityColor[issue.severity]}`, paddingLeft: '10px', paddingBottom: '10px', paddingTop: index > 0 ? '10px' : 0, borderBottom: isLast ? 'none' : '1px solid #334155' }}>
       <div>
-        <span style={{ color: severityColor[issue.severity], fontWeight: 700 }}>#{index + 1} {severityLabel[issue.severity]}</span>
-        {' — '}<strong>{issue.title}</strong>
+        <span style={{ color: severityColor[issue.severity], fontWeight: severityWeight[issue.severity], fontSize: severitySize[issue.severity] }}>#{index + 1} {severityLabel[issue.severity]}</span>
+        {', '}<strong>{issue.title}</strong>
         {issue.amount ? <span style={{ color: '#94a3b8' }}> ({formatCurrency(issue.amount, region)})</span> : null}
       </div>
       {issue.observed || issue.possibleReasons ? (
@@ -168,7 +194,7 @@ function IssueRow({ issue, index, isLast, region, hasDeepScan }: { issue: TopIss
       ) : (
         <>
           <div style={{ color: '#94a3b8', marginTop: '3px' }}>{issue.detail}</div>
-          <div style={{ color: '#e8792c', marginTop: '3px' }}>First check: {issue.firstCheck}</div>
+          <div style={{ color: '#f8fafc', marginTop: '3px' }}>First check: {issue.firstCheck}</div>
         </>
       )}
     </div>
@@ -199,8 +225,8 @@ function ClientReportView({ result, topIssues, badge }: { result: AuditDashboard
         ))}
       </div>
       {result.report.clientReportedIssue && (
-        <div style={{ marginTop: '18px', padding: '10px 12px', background: '#1e293b', borderLeft: '4px solid #e8792c', color: '#f8fafc', fontSize: '0.85rem' }}>
-          Client reported: "{result.report.clientReportedIssue}" — not independently verified, shown as context for this audit.
+        <div style={{ marginTop: '18px', padding: '10px 12px', background: '#1e293b', borderLeft: '4px solid #f8fafc', color: '#f8fafc', fontSize: '0.85rem' }}>
+          Client reported: "{result.report.clientReportedIssue}", not independently verified, shown as context for this audit.
         </div>
       )}
       <h3 style={{ marginTop: '22px' }}>Priority actions {topIssues.totalFound > 10 ? `(top 10 of ${topIssues.totalFound})` : ''}</h3>
@@ -208,8 +234,8 @@ function ClientReportView({ result, topIssues, badge }: { result: AuditDashboard
           the pre-engagement Report, meant to explain what's wrong clearly
           enough to be credible, not hand over the fix steps for free. That
           depth belongs in Validation, after the client's actually paying.
-          Split by partitionEdgeCases (same mechanism as Stage 2's own Top
-          Issues/Edge Cases view) so the confidence gap is legible on the
+          Split by partitionEdgeCases (same mechanism as the Deep Scan tab's own
+          Top Issues/Edge Cases view) so the confidence gap is legible on the
           page itself — a "measured" finding (e.g. duplicate containers)
           reads very differently from a "low confidence, needs confirming"
           one (e.g. no-CMP-detected), and without a live call to explain
@@ -232,7 +258,7 @@ function ClientReportView({ result, topIssues, badge }: { result: AuditDashboard
             )}
             {worthConfirming.length > 0 && (
               <>
-                <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#b45309', marginTop: '14px' }}>WORTH CONFIRMING</div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 800, letterSpacing: '0.5px', color: '#f8fafc', marginTop: '14px' }}>WORTH CONFIRMING</div>
                 <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '2px' }}>Evidence points here, but more than one real-world cause is possible from outside evidence alone.</div>
                 <ol style={{ paddingLeft: '20px', color: '#f8fafc', lineHeight: 1.55, marginTop: '4px' }}>
                   {worthConfirming.map((issue) => (
@@ -249,21 +275,15 @@ function ClientReportView({ result, topIssues, badge }: { result: AuditDashboard
         {result.report.scopeNotes.map((note: { category: string; statement: string }, i: number) => <li key={i}><strong>{note.category}:</strong> {note.statement}</li>)}
       </ul>
       <div style={{ marginTop: '24px', textAlign: 'center', fontSize: '1rem', fontWeight: 700, color: '#f8fafc' }}>Jason <span style={{ color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }}>(preferred name)</span></div>
-      <div style={{ textAlign: 'center', fontSize: '1.15rem', fontWeight: 800, color: '#b45309', marginTop: '2px' }}>jagjit@jsonalytics.com</div>
+      <div style={{ textAlign: 'center', fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc', marginTop: '2px' }}>jagjit@jsonalytics.com</div>
       <div style={{ textAlign: 'center', fontSize: '1rem', fontWeight: 700, color: '#f8fafc', marginTop: '4px' }}>WhatsApp: +91-8588006657</div>
-      <div style={{ textAlign: 'center', fontSize: '0.8rem', color: '#94a3b8', marginTop: '6px' }}>US account via Wise — universally accepted, easy international payment.</div>
+      <div style={{ textAlign: 'center', fontSize: '0.8rem', color: '#94a3b8', marginTop: '6px' }}>US account via Wise. Universally accepted, easy international payment.</div>
       <div style={{ textAlign: 'center', fontSize: '0.8rem', color: '#94a3b8', marginTop: '4px' }}>Ownership declaration available upon request.</div>
     </div>
   );
 }
 
-type TabKey = 'noAccess' | 'deepScan' | 'withAccess' | 'clientReport' | 'leads';
-
-const toneColor: Record<string, string> = {
-  good: '#f8fafc',
-  warn: '#b45309',
-  bad: '#e8792c',
-};
+type TabKey = 'deepScan' | 'withAccess' | 'clientReport' | 'leads';
 
 // Plain-language labels for the raw internal signal states shown in the
 // Report Focus card — operators shouldn't have to decode enum values like
@@ -279,25 +299,36 @@ const guidedChecks = [
   { id: 'ga4-ecommerce', title: 'Validate GA4 ecommerce', where: 'GA4 DebugView', lookFor: 'purchase and add_to_cart events with ecommerce parameters.', good: 'Events appear once and revenue matches the test order.', href: 'https://support.google.com/analytics/answer/7201382' },
   { id: 'ad-platform-attribution', title: 'Validate ad-platform attribution', where: 'Meta Events Manager / platform diagnostics', lookFor: 'Browser and server events, matching event_id, and no duplicate purchase.', good: 'A single deduplicated purchase is received with no critical diagnostics.', href: 'https://www.facebook.com/events_manager2/' },
   { id: 'revenue-reconciliation', title: 'Reconcile store revenue', where: 'Shopify Orders export', lookFor: 'The same date range, refunds, COD orders, and fulfillment statuses.', good: 'Shopify order totals provide the confirmed source for the report.', href: 'https://admin.shopify.com/' },
+  // Deliberately a manual check, not an automated finding — the deep scan
+  // only ever navigates the homepage (read-only, no cart mutations, no
+  // checkout navigation, by design). Confirming this requires seeing the
+  // actual Thank You/Order Status page, which needs a real completed order.
+  // Real, dated event this closes a gap on: on 2026-08-26 Shopify
+  // auto-upgraded every remaining non-Plus store to Checkout Extensibility —
+  // the old "Additional Scripts" field on the Thank You/Order Status page
+  // stopped running entirely. Any store that had manually-pasted purchase/
+  // conversion tracking sitting there had it silently break, with nothing
+  // in the Shopify Admin UI to flag it.
+  { id: 'checkout-migration-tracking', title: 'Confirm checkout tracking survived the Aug 26, 2026 migration', where: 'Shopify Admin > Settings > Customer events (search "Shopify customer events" if the menu has moved)', lookFor: 'Any purchase/conversion tracking that used to live in the old "Additional Scripts" field on the Thank You/Order Status page — that field stopped running for every non-Plus store on August 26, 2026.', good: 'Purchase tracking is set up as a real Web Pixel here, not still assumed to be running from the deprecated Additional Scripts field.', href: 'https://help.shopify.com/en/manual/promoting-marketing/pixels' },
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabKey>('noAccess');
+  const [activeTab, setActiveTab] = useState<TabKey>('deepScan');
   const [region, setRegion] = useState<Region>('US');
+  // Deep Scan tab's own sub-navigation — each section is its own page now
+  // instead of a stack of collapsible dropdowns.
+  type DeepScanSection = 'overview' | 'evidence' | 'scope' | 'recommendations' | 'guided';
+  const [deepScanSection, setDeepScanSection] = useState<DeepScanSection>('overview');
 
-  // ---- Tab 1: No Access ----
-  // Shares `storeUrl` (declared below, under Tab 2) with Deep Scan and With
-  // Access on purpose — one store, entered once, regardless of which tab's
-  // scan logic and results (kept fully separate) you run against it.
-  const [isSurfaceScanning, setIsSurfaceScanning] = useState(false);
-  const [surfaceResult, setSurfaceResult] = useState<SurfaceAuditResult | null>(null);
-  const [surfaceError, setSurfaceError] = useState<string | null>(null);
-
-  // ---- Tab 2: With Access ----
+  // ---- With Access tab ----
   const [storeUrl, setStoreUrl] = useState('');
   const [auditDeepScan, setAuditDeepScan] = useState<DeepScanResult | null>(null);
   const [isAuditDeepScanning, setIsAuditDeepScanning] = useState(false);
   const [auditDeepScanError, setAuditDeepScanError] = useState<string | null>(null);
+  // Storefront password — only for stores you or a client have actually
+  // given you the password for (your own dev store, a client's staging
+  // site). Never used to guess access. Kept in memory only, never persisted.
+  const [storefrontPassword, setStorefrontPassword] = useState('');
   const [gtmIdInput, setGtmIdInput] = useState('');
   const [ga4IdInput, setGa4IdInput] = useState('');
   const [ga4PropertyIdInput, setGa4PropertyIdInput] = useState('');
@@ -409,42 +440,17 @@ export default function App() {
     if (detected) setRegion(detected);
   };
 
-  // The "Reconcile store revenue" guided check is the one link that CAN be
-  // store-specific (we already know storeUrl at this point) — the other 3
-  // are generic external tools (Tag Assistant, a GA4 help doc, Meta Events
-  // Manager) that have no per-store deep link, so they stay static.
+  // The "Reconcile store revenue" and "checkout migration" guided checks are
+  // the ones that CAN be store-specific (we already know storeUrl at this
+  // point) — the other 3 are generic external tools (Tag Assistant, a GA4
+  // help doc, Meta Events Manager) that have no per-store deep link, so they
+  // stay static.
   const resolveCheckHref = (check: { id: string; href: string }) => {
-    if (check.id !== 'revenue-reconciliation' || !storeUrl.trim()) return check.href;
+    if (!storeUrl.trim()) return check.href;
     const bareDomain = storeUrl.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    return `https://${bareDomain}/admin/orders`;
-  };
-
-  // ===== Tab 1 handlers =====
-
-  // Stage 1 is a URL/page scan only — static HTML, no deep scan (that lives
-  // in Stage 2 now, where it feeds the real diagnostic engine). The 8
-  // business-metric cards below are a possibility claim from this static
-  // evidence alone.
-  const handleSurfaceScan = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!storeUrl) return;
-    setIsSurfaceScanning(true);
-    setSurfaceResult(null);
-    setSurfaceError(null);
-    try {
-      const result = await runSurfaceAudit(storeUrl, region);
-      setSurfaceResult(result);
-      if (result.status === 'error') setSurfaceError(result.error || 'Scan failed.');
-      // Kick off the Deep Scan tab's full diagnostic in the background too
-      // — not awaited, so this button's own "Scanning..." state reflects
-      // just the surface half; the Deep Scan tab tracks its own progress
-      // via isScanning and just has results waiting once it finishes.
-      else void runDeepDiagnostic();
-    } catch (err: any) {
-      setSurfaceError(err.message || 'Scan failed unexpectedly.');
-    } finally {
-      setIsSurfaceScanning(false);
-    }
+    if (check.id === 'revenue-reconciliation') return `https://${bareDomain}/admin/orders`;
+    if (check.id === 'checkout-migration-tracking') return `https://${bareDomain}/admin/settings`;
+    return check.href;
   };
 
   const handleAuditDeepScan = async () => {
@@ -452,7 +458,7 @@ export default function App() {
     setIsAuditDeepScanning(true);
     setAuditDeepScanError(null);
     try {
-      setAuditDeepScan(await fetchDeepScan(storeUrl));
+      setAuditDeepScan(await fetchDeepScan(storeUrl, storefrontPassword || undefined));
     } catch (err: any) {
       setAuditDeepScanError(err.message || 'Deep scan failed.');
     } finally {
@@ -482,34 +488,12 @@ export default function App() {
       return ecommerce && typeof ecommerce === 'object' ? Object.keys(ecommerce) : [];
     })));
 
-  // Tab 1's own evidence panel reads eventEvidence directly instead — this
-  // pair is only needed for Tab 2's "dataLayer evidence" grid.
+  // Only needed for the With Access tab's "dataLayer evidence" grid; the
+  // Deep Scan tab reads eventEvidence directly instead.
   const auditDataLayerEvents = extractDataLayerEvents(validAuditDeepScan);
   const auditEcommerceFields = extractEcommerceFields(validAuditDeepScan);
 
-  // Locate+Point/Guide (AUDIT -> LOCATE -> POINT -> GUIDE) lives only in the
-  // Full Audit tab now — Stage 1 is the region-blind, screenshot-friendly
-  // ice-breaker and no longer renders diagnostic detail at all.
-
-  // Blends in the same-URL deep scan once it resolves (it's kicked off
-  // automatically by handleSurfaceScan) so Stage 1's headline numbers don't
-  // sit on a false "signal missing" verdict for stores that track fine via
-  // client-side JS static HTML can't see — real false negative confirmed
-  // live against gymshark.com. Stage 1's layout stays exactly as simple as
-  // before (no added Locate+Point+Guide detail); only the evidence feeding
-  // the existing cards changes. Reused by handleContinueToFullAudit below —
-  // the detected GTM/GA4 ID is exactly the "logic applied" allowed to carry
-  // forward to stage 2, where a real deep scan can confirm or correct it.
-  const effectiveSurfaceSignals = useMemo(() => {
-    if (!surfaceResult || surfaceResult.status !== 'ok') return null;
-    return resolveEffectiveSignals(surfaceResult, validAuditDeepScan);
-  }, [surfaceResult, validAuditDeepScan]);
-  const enrichedCards = useMemo(() => {
-    if (!surfaceResult || surfaceResult.status !== 'ok' || !effectiveSurfaceSignals) return [];
-    return buildSurfaceCards(effectiveSurfaceSignals, surfaceResult.hasCmp, surfaceResult.cmpName, region);
-  }, [surfaceResult, effectiveSurfaceSignals, region]);
-
-  // "GA4 connected" != "GA4 implementation is correct" — reconcile what the
+  // "GA4 connected" != "GA4 implementation is correct": reconcile what the
   // live API actually reports against what was observed on the storefront.
   const apiReconciliation = useMemo(() => {
     if (!scanResult || scanResult.status === 'error') return [];
@@ -537,7 +521,7 @@ export default function App() {
     return attachRevenueImpact(withManual, liveGa4.purchaseRevenue, scanResult.metrics.grossRevenue, region);
   }, [scanResult, manualCheckResults, liveGa4, region]);
 
-  // ===== Tab 2 handlers =====
+  // ===== With Access handlers =====
 
   const handlePullLiveOrders = async () => {
     setIsPullingShopify(true);
@@ -638,17 +622,22 @@ export default function App() {
     setValidationResult(null);
     setValidationError(null);
     setClientReportView('audit');
+    setDeepScanSection('overview'); // a fresh scan always lands back on the summary, not wherever the last scan left off
 
     // Auto-run the deep scan alongside the audit if it hasn't already been
     // run for this exact URL (e.g. via a manual "Inspect dataLayer" click) —
     // same read-only guarantee either way, no reason to make it a separate
-    // step the operator has to remember before every audit.
-    let deepEvidence = validAuditDeepScan;
+    // step the operator has to remember before every audit. A cached
+    // passwordProtected result is treated as "no real evidence yet," not a
+    // valid cache hit — otherwise typing a password and re-submitting would
+    // just silently reuse the locked placeholder from the first attempt
+    // instead of actually trying again.
+    let deepEvidence = validAuditDeepScan?.passwordProtected ? null : validAuditDeepScan;
     if (!deepEvidence) {
       setIsAuditDeepScanning(true);
       setAuditDeepScanError(null);
       try {
-        deepEvidence = await fetchDeepScan(storeUrl);
+        deepEvidence = await fetchDeepScan(storeUrl, storefrontPassword || undefined);
         setAuditDeepScan(deepEvidence);
       } catch (err: any) {
         setAuditDeepScanError(err.message || 'Deep scan failed.');
@@ -726,7 +715,7 @@ export default function App() {
               rtoOrders: csvInputs.rtoOrders || Number(financialInputs.rtoOrders),
             }
           : null;
-      const deepEvidence = await fetchDeepScan(storeUrl).catch(() => null);
+      const deepEvidence = await fetchDeepScan(storeUrl, storefrontPassword || undefined).catch(() => null);
       const result = await runFullAudit(
         storeUrl,
         validationInputs,
@@ -763,7 +752,7 @@ export default function App() {
     // tracking-only audit produces. This is the one place that mandate is
     // actually enforced now (moved here from scan time).
     if (!csvInputs) {
-      setErr('Load Shopify order data (CSV upload or live pull) before exporting the PDF — the report needs real financial numbers, not the tracking-only view.');
+      setErr('Load Shopify order data (CSV upload or live pull) before exporting the PDF. The report needs real financial numbers, not the tracking-only view.');
       return;
     }
     const requiredFinancialFields = ['cogs', 'shipping', 'adSpend', 'settlementDays'] as const;
@@ -790,7 +779,7 @@ export default function App() {
     // behind the operator's back (which could also pick up live store
     // changes since the last review, a worse surprise than one extra click).
     if (target.report.businessMetrics.some((m: { value: string }) => m.value.includes('Unaccessed'))) {
-      setErr('Numbers are confirmed but this audit run predates them — re-run the scan to include them, then export.');
+      setErr('Numbers are confirmed but this audit run predates them. Re-run the scan to include them, then export.');
       return;
     }
     setIsExportingPdf(true);
@@ -868,8 +857,8 @@ export default function App() {
   // "Pay less emphasis on what's correct, notify what's wrong hard" —
   // explicit user direction (2026-08-19). A tile whose signal is present
   // stays small and quiet (muted gray, thin border, no visual competition
-  // with actual problems); a missing/wrong one gets the orange accent,
-  // bold weight, and a highlighted border so it's the thing the eye lands
+  // with actual problems); a missing/wrong one gets brighter text, bold
+  // weight, and a highlighted border so it's the thing the eye lands
   // on first. Same tile shape reused for every signal instead of 5+
   // separate ad-hoc renderings drifting from each other over time.
   const signalTile = (label: string, ok: boolean, value: string) => (
@@ -878,11 +867,11 @@ export default function App() {
       style={
         ok
           ? { backgroundColor: '#0f172a', padding: '5px 8px', borderRadius: '6px', border: '1px solid #334155' }
-          : { backgroundColor: 'rgba(232,121,44,0.1)', padding: '7px 9px', borderRadius: '6px', border: '1px solid #e8792c' }
+          : { backgroundColor: '#1e293b', padding: '7px 9px', borderRadius: '6px', border: '1px solid #f8fafc' }
       }
     >
-      <span style={{ color: ok ? '#64748b' : '#e8792c', fontSize: ok ? '0.6rem' : '0.64rem', fontWeight: ok ? 500 : 700 }}>{label}</span>
-      <p style={{ fontSize: ok ? '0.74rem' : '0.82rem', fontWeight: ok ? 500 : 800, margin: '3px 0 0 0', color: ok ? '#94a3b8' : '#e8792c' }}>{value}</p>
+      <span style={{ color: ok ? '#64748b' : '#f8fafc', fontSize: ok ? '0.6rem' : '0.64rem', fontWeight: ok ? 500 : 700 }}>{label}</span>
+      <p style={{ fontSize: ok ? '0.74rem' : '0.82rem', fontWeight: ok ? 500 : 800, margin: '3px 0 0 0', color: ok ? '#94a3b8' : '#f8fafc' }}>{value}</p>
     </div>
   );
 
@@ -896,6 +885,8 @@ export default function App() {
     if (scanResult.metrics.hasMicrosoftUet) otherPlatforms.push('Microsoft UET');
     return (
       <div style={{ display: 'grid', gap: '1rem' }}>
+      {deepScanSection === 'overview' && (
+      <>
         {/* At a Glance — target/score + tracking signatures merged into one
             panel (was 5 separate bordered boxes: an Overview Card plus 4
             individual metric cards — consolidated to cut box-count clutter
@@ -931,8 +922,8 @@ export default function App() {
 
         {/* Volume triage note — "point me to the biggest leak" */}
         {scanResult.report.volumeNote && (
-          <div style={{ backgroundColor: 'rgba(180,83,9,0.08)', border: '1px solid rgba(180,83,9,0.3)', borderRadius: '8px', padding: '10px 12px' }}>
-            <div style={{ color: '#b45309', fontWeight: 700, fontSize: '0.74rem', marginBottom: '3px' }}>Start Here</div>
+          <div style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '10px 12px' }}>
+            <div style={{ color: '#f8fafc', fontWeight: 900, fontSize: '0.85rem', letterSpacing: '0.5px', textTransform: 'uppercase', marginBottom: '4px' }}>Start Here</div>
             <div style={{ color: '#f8fafc', fontSize: '0.78rem' }}>{scanResult.report.volumeNote}</div>
           </div>
         )}
@@ -949,29 +940,10 @@ export default function App() {
             <span style={{ backgroundColor: '#0f172a', border: '1px solid #334155', padding: '6px 12px', borderRadius: '999px', color: '#f8fafc', fontSize: '0.8rem' }}>{scanResult.report.storeMode}</span>
           </div>
 
-          <details style={{ marginBottom: '1rem' }}>
-            <summary style={{ cursor: 'pointer', fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Evidence sources</summary>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '8px' }}>
-              <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
-                <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Source Signals</div>
-                <div style={{ marginTop: '6px', color: '#f8fafc', fontWeight: 700 }}>dataLayer: {signalSourceLabels.dataLayer[scanResult.report.signalSources.dataLayer] || scanResult.report.signalSources.dataLayer}</div>
-                <div style={{ color: '#f8fafc', fontWeight: 700 }}>Server-side: {signalSourceLabels.stape[scanResult.report.signalSources.stape] || scanResult.report.signalSources.stape}</div>
-                <div style={{ color: '#f8fafc', fontWeight: 700 }}>Purchase: {signalSourceLabels.purchaseSignals[scanResult.report.signalSources.purchaseSignals] || scanResult.report.signalSources.purchaseSignals}</div>
-                <div style={{ marginTop: '6px', color: scanResult.report.evidenceDepth === 'static+deep' ? '#f8fafc' : '#b45309', fontSize: '0.72rem' }}>
-                  Evidence: {scanResult.report.evidenceDepth === 'static+deep' ? 'page scan + deep scan' : 'page scan only — deep scan failed, see error above'}
-                </div>
-              </div>
-              <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
-                <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Status</div>
-                <div style={{ marginTop: '6px', color: '#b45309' }}>{scanResult.report.status}</div>
-              </div>
-            </div>
-          </details>
-
           <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
             {scanResult.report.clientReportedIssue && (
-              <div style={{ backgroundColor: 'rgba(232,121,44,0.08)', border: '1px solid rgba(232,121,44,0.3)', borderRadius: '6px', padding: '8px 10px', marginBottom: '10px', fontSize: '0.76rem', color: '#f8fafc' }}>
-                <strong>Client reported:</strong> "{scanResult.report.clientReportedIssue}"{scanResult.report.clientReportedCategory ? ` — ranked toward ${scanResult.report.clientReportedCategory} findings below` : ''}. Not independently verified — context only.
+              <div style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '6px', padding: '8px 10px', marginBottom: '10px', fontSize: '0.76rem', color: '#f8fafc' }}>
+                <strong>Client reported:</strong> "{scanResult.report.clientReportedIssue}"{scanResult.report.clientReportedCategory ? `, ranked toward ${scanResult.report.clientReportedCategory} findings below` : ''}. Not independently verified, context only.
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' }}>
@@ -983,7 +955,7 @@ export default function App() {
               </div>
             </div>
             {mergedTopIssues!.issues.length === 0 ? (
-              <div style={{ fontSize: '0.78rem', color: '#f8fafc' }}>No confirmed issues from the evidence gathered — proceed to the guided checks below to validate what a scan can't see.</div>
+              <div style={{ fontSize: '0.78rem', color: '#f8fafc' }}>No confirmed issues from the evidence gathered.</div>
             ) : (() => {
               const { topIssues: confidentIssues, edgeCases } = partitionEdgeCases(mergedTopIssues!.issues);
               return (
@@ -997,8 +969,8 @@ export default function App() {
                   )}
                   {edgeCases.length > 0 && (
                     <div style={{ marginTop: confidentIssues.length > 0 ? '16px' : 0 }}>
-                      <div style={{ backgroundColor: 'rgba(180,83,9,0.08)', border: '1px solid rgba(180,83,9,0.3)', borderRadius: '8px', padding: '8px 12px', marginBottom: '10px', fontSize: '0.76rem', color: '#b45309' }}>
-                        {edgeCases.length} edge case{edgeCases.length === 1 ? '' : 's'} found — {edgeCases.length === 1 ? 'this has' : 'these have'} more than one possible cause this scan can't narrow down on its own. Check the Guide tab on each.
+                      <div style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '8px 12px', marginBottom: '10px', fontSize: '0.76rem', color: '#f8fafc' }}>
+                        <strong style={{ fontWeight: 800 }}>{edgeCases.length} edge case{edgeCases.length === 1 ? '' : 's'} found</strong>, {edgeCases.length === 1 ? 'this has' : 'these have'} more than one possible cause this scan can't narrow down on its own. Check the Guide tab on each.
                       </div>
                       <div style={{ display: 'grid', gap: '8px' }}>
                         {edgeCases.map((issue, i) => (
@@ -1012,24 +984,55 @@ export default function App() {
             })()}
           </div>
         </div>
+      </>
+      )}
 
-        {/* Secondary/supplementary — kept visually lighter and collapsed by
-            default so they don't compete with Priority Findings above. */}
-        <details style={{ backgroundColor: '#1e293b', borderRadius: '12px', border: '1px solid #334155', padding: '0.75rem 1rem' }}>
-          <summary style={{ cursor: 'pointer', fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Audit scope &amp; limitations ({scanResult.report.scopeNotes.length})</summary>
-          <ul style={{ paddingLeft: '18px', color: '#94a3b8', lineHeight: 1.5, fontSize: '0.8rem', marginTop: '10px' }}>
-            {scanResult.report.scopeNotes.map((note: { category: string; statement: string }, i: number) => <li key={i}><strong>{note.category}:</strong> {note.statement}</li>)}
-          </ul>
-        </details>
+      {deepScanSection === 'evidence' && (
+        <div style={{ backgroundColor: '#1e293b', borderRadius: '12px', border: '1px solid #334155', padding: '1rem 1.25rem' }}>
+          <div style={sectionLabelStyle}>Evidence Sources</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '10px' }}>
+            <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Source Signals</div>
+              <div style={{ marginTop: '6px', color: '#f8fafc', fontWeight: 700 }}>dataLayer: {signalSourceLabels.dataLayer[scanResult.report.signalSources.dataLayer] || scanResult.report.signalSources.dataLayer}</div>
+              <div style={{ color: '#f8fafc', fontWeight: 700 }}>Server-side: {signalSourceLabels.stape[scanResult.report.signalSources.stape] || scanResult.report.signalSources.stape}</div>
+              <div style={{ color: '#f8fafc', fontWeight: 700 }}>Purchase: {signalSourceLabels.purchaseSignals[scanResult.report.signalSources.purchaseSignals] || scanResult.report.signalSources.purchaseSignals}</div>
+              <div style={{ marginTop: '6px', color: '#f8fafc', fontSize: '0.72rem', fontWeight: scanResult.report.evidenceDepth === 'static+deep' ? 400 : 800 }}>
+                Evidence: {scanResult.report.evidenceDepth === 'static+deep' ? 'page scan + deep scan' : 'page scan only, deep scan failed'}
+              </div>
+            </div>
+            <div style={{ backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155', padding: '12px' }}>
+              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Status</div>
+              <div style={{ marginTop: '6px', color: '#f8fafc' }}>{scanResult.report.status}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
-        <details style={{ backgroundColor: '#1e293b', borderRadius: '12px', border: '1px solid #334155', padding: '0.75rem 1rem' }} open={scanResult.recommendations.length > 0}>
-          <summary style={{ cursor: 'pointer', fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Recommendations ({scanResult.recommendations.length})</summary>
+      {deepScanSection === 'scope' && (
+        <div style={{ backgroundColor: '#1e293b', borderRadius: '12px', border: '1px solid #334155', padding: '1rem 1.25rem' }}>
+          <div style={sectionLabelStyle}>Audit Scope &amp; Limitations ({scanResult.report.scopeNotes.length})</div>
+          {scanResult.report.scopeNotes.length === 0 ? (
+            <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '10px' }}>No scope caveats recorded for this scan.</div>
+          ) : (
+            <ul style={{ paddingLeft: '18px', color: '#94a3b8', lineHeight: 1.5, fontSize: '0.8rem', marginTop: '10px' }}>
+              {scanResult.report.scopeNotes.map((note: { category: string; statement: string }, i: number) => <li key={i}><strong>{note.category}:</strong> {note.statement}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {deepScanSection === 'recommendations' && (
+        <div style={{ backgroundColor: '#1e293b', borderRadius: '12px', border: '1px solid #334155', padding: '1rem 1.25rem' }}>
+          <div style={sectionLabelStyle}>Recommendations ({scanResult.recommendations.length})</div>
+          {scanResult.recommendations.length === 0 && (
+            <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '10px' }}>No recommendations from this scan.</div>
+          )}
           <div style={{ display: 'grid', gap: '8px', marginTop: '10px' }}>
             {scanResult.recommendations.map((rec: { type: string; text: string }, idx: number) => {
-              // type was captured but never actually affected rendering —
+              // type was captured but never actually affected rendering:
               // every recommendation looked identical regardless of
-              // severity. Warnings now get the loud/orange treatment,
-              // success stays quiet/muted, matching the same "correct
+              // severity. Warnings now get heavier weight and a brighter
+              // border, success stays quiet/muted, matching the same "correct
               // stays quiet, wrong gets loud" rule applied everywhere else.
               const isWarning = rec.type === 'warning';
               const isSuccess = rec.type === 'success';
@@ -1038,16 +1041,17 @@ export default function App() {
                   key={idx}
                   style={
                     isWarning
-                      ? { backgroundColor: 'rgba(232,121,44,0.1)', padding: '10px 13px', borderRadius: '8px', border: '1px solid #e8792c' }
+                      ? { backgroundColor: '#1e293b', padding: '10px 13px', borderRadius: '8px', border: '1px solid #f8fafc' }
                       : { backgroundColor: '#0f172a', padding: '9px 12px', borderRadius: '8px', border: '1px solid #334155' }
                   }
                 >
-                  <span style={{ fontSize: isWarning ? '0.87rem' : '0.85rem', fontWeight: isWarning ? 700 : 400, color: isWarning ? '#e8792c' : isSuccess ? '#64748b' : '#f8fafc' }}>{rec.text}</span>
+                  <span style={{ fontSize: isWarning ? '0.9rem' : '0.85rem', fontWeight: isWarning ? 800 : 400, color: isWarning ? '#f8fafc' : isSuccess ? '#64748b' : '#f8fafc' }}>{rec.text}</span>
                 </div>
               );
             })}
           </div>
-        </details>
+        </div>
+      )}
       </div>
     );
   };
@@ -1077,9 +1081,8 @@ export default function App() {
               logic in the diagnostic) and With Access (currency formatting)
               — connection-status badges (LIVE FEED, Sources Connected) stay
               With-Access-only since that's the only tab access keys apply
-              to. Stage 1 stays region-blind by design, and Client
-              Report/Register are client-facing or churn-list surfaces
-              where either would just be header noise. */}
+              to. Client Report/Register are client-facing or churn-list
+              surfaces where either would just be header noise. */}
           {(activeTab === 'deepScan' || activeTab === 'withAccess') && (
             <div className="top-actions" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#94a3b8' }}>
@@ -1112,14 +1115,11 @@ export default function App() {
         <>
             {/* ===== Tabs ===== */}
             <div style={{ display: 'flex', gap: '4px', marginBottom: '0' }}>
-              <button style={tabButtonStyle('noAccess')} onClick={() => setActiveTab('noAccess')}>
-                No Access — Surface Dashboard
-              </button>
               <button style={tabButtonStyle('deepScan')} onClick={() => setActiveTab('deepScan')}>
                 Deep Scan
               </button>
               <button style={tabButtonStyle('withAccess')} onClick={() => setActiveTab('withAccess')}>
-                With Access — Full Audit
+                With Access
               </button>
               <button style={tabButtonStyle('clientReport')} onClick={() => setActiveTab('clientReport')}>
                 Client Report
@@ -1130,12 +1130,13 @@ export default function App() {
             </div>
             <div style={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderTop: 'none', borderRadius: '0 0 12px 12px', padding: '1.5rem', marginBottom: '2rem' }}>
 
-              {/* ================= TAB 1: NO ACCESS ================= */}
-              {activeTab === 'noAccess' && (
-                <div>
-                  <h2 style={{ fontSize: '1.05rem', margin: '0 0 10px 0' }}>Surface Scan Dashboard</h2>
 
-                  <form onSubmit={handleSurfaceScan} style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+              {/* ================= TAB: DEEP SCAN — access-free, the entire
+                  AUDIT->LOCATE->POINT->GUIDE diagnostic lives here and only
+                  here now. Just a URL, nothing store-specific. ================= */}
+              {activeTab === 'deepScan' && (
+                <div>
+                  <form onSubmit={handleScan} style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
                     <input
                       type="text"
                       placeholder="Enter store URL (e.g., mystore.myshopify.com)"
@@ -1143,139 +1144,102 @@ export default function App() {
                       onChange={(e) => applyUrlAndDetectRegion(e.target.value, setStoreUrl)}
                       style={{ flex: 5, minWidth: '320px', padding: '10px 12px', backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', color: '#f8fafc', fontSize: '0.9rem', outline: 'none' }}
                     />
+                    {/* Only appears once a scan has actually hit a password
+                        gate — stays hidden for the normal case (a public
+                        store) so the form isn't cluttered with a field most
+                        scans never need. */}
+                    {validAuditDeepScan?.passwordProtected && (
+                      <input
+                        type="password"
+                        placeholder="Storefront password"
+                        value={storefrontPassword}
+                        onChange={(e) => setStorefrontPassword(e.target.value)}
+                        title="Only for a store you or a client have actually given you the password for, never used to guess access."
+                        autoFocus
+                        style={{ flex: 2, minWidth: '180px', padding: '10px 12px', backgroundColor: '#0f172a', border: '1px solid #f8fafc', borderRadius: '8px', color: '#f8fafc', fontSize: '0.9rem', outline: 'none' }}
+                      />
+                    )}
                     <button
                       type="submit"
-                      disabled={isSurfaceScanning}
+                      disabled={isScanning}
                       style={{ backgroundColor: '#b45309', color: '#f8fafc', border: 'none', padding: '0 24px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}
                     >
-                      {isSurfaceScanning ? 'Scanning...' : 'Scan Store'}
+                      {isScanning ? 'Scanning...' : 'Scan Store'}
                     </button>
                   </form>
 
-                  {surfaceError && (
-                    <div style={{ marginBottom: '12px', color: '#e8792c', fontSize: '0.82rem', backgroundColor: 'rgba(232,121,44,0.08)', border: '1px solid rgba(232,121,44,0.3)', borderRadius: '8px', padding: '10px 14px' }}>
-                      Error: {surfaceError}
-                    </div>
-                  )}
-
-                  {surfaceResult && surfaceResult.status === 'ok' && (
-                    <>
-                      {/* Client-facing first: the 8 business metric cards only —
-                          Attribution/Compliance are diagnostic detail, not a
-                          business metric, so they've moved to the bottom
-                          section below instead of sitting in this screenshot-
-                          friendly top block. This whole block IS the
-                          deliverable a client sees cold (often just a
-                          screenshot). */}
-                      {/* Split is driven entirely by each card's own `locked`
-                          flag — auto-adjusts per store, nothing hardcoded
-                          about which labels land in which group. Both groups
-                          render as full individual cards (big metric name,
-                          1-line explainer, small value/status) — "Need
-                          Access" is just a small section label separating
-                          them, not a container that collapses the cards
-                          underneath it into a list. Sized to fit the whole
-                          block on one screen (2026-08-15, explicit request:
-                          one screenshot, not a scroll). */}
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '8px' }}>
-                        {enrichedCards.filter((c) => !c.locked && c.label !== 'Attribution' && !c.label.startsWith('Compliance')).map((card, i) => (
-                          <div key={i} style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '9px 11px' }}>
-                            {/* Size hierarchy is deliberate, standard across every
-                                card: the metric itself is what a client scans for
-                                first, so it's the heading; the explainer is
-                                supporting context, one step down; the value is
-                                read last, smallest — a status line, not the point. */}
-                            <div style={{ color: '#f8fafc', fontSize: '0.85rem', fontWeight: 700, letterSpacing: '0.1px' }}>{card.label}</div>
-                            <div style={{ marginTop: '4px', fontSize: '0.76rem', fontWeight: 600, color: '#94a3b8', lineHeight: 1.3 }}>{card.explainer}</div>
-                            {!!card.value && (
-                              <div style={{ marginTop: '4px', fontSize: '0.66rem', fontWeight: 600, letterSpacing: '0.2px', color: toneColor[card.tone] }}>{card.value}</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-
-                      {enrichedCards.some((c) => c.locked) && (
-                        <>
-                          <div style={{ color: '#94a3b8', fontSize: '0.66rem', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', margin: '10px 0 6px' }}>Need Access</div>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '8px' }}>
-                            {enrichedCards.filter((c) => c.locked && c.label !== 'Attribution' && !c.label.startsWith('Compliance')).map((card, i) => (
-                              <div key={i} style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '9px 11px' }}>
-                                <div style={{ color: '#f8fafc', fontSize: '0.85rem', fontWeight: 700, letterSpacing: '0.1px' }}>{card.label}</div>
-                                <div style={{ marginTop: '4px', fontSize: '0.76rem', fontWeight: 600, color: '#94a3b8', lineHeight: 1.3 }}>{card.explainer}</div>
-                                {!!card.value && (
-                                  <div style={{ marginTop: '4px', fontSize: '0.66rem', fontWeight: 600, letterSpacing: '0.2px', color: toneColor[card.tone] }}>{card.value}</div>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </>
-                      )}
-
-                      {/* Urgency grounded in a real, already-computed number
-                          (missingSignalCount) — never fabricated, and only
-                          shown when there's an actual gap to point at. */}
-                      {!!effectiveSurfaceSignals?.missingSignalCount && (
-                        <div style={{ color: '#b45309', fontSize: '0.85rem', fontWeight: 600, marginTop: '0.75rem' }}>
-                          {effectiveSurfaceSignals.missingSignalCount} of 4 core tracking signals missing — every day this sits, ad spend keeps flowing into channels you can't measure.
-                        </div>
-                      )}
-
-                      <div style={{ backgroundColor: 'rgba(232,121,44,0.12)', border: '1px solid #e8792c', borderRadius: '8px', padding: '10px 14px', marginTop: '0.75rem' }}>
-                        <span style={{ color: '#e8792c', fontSize: '0.88rem', fontWeight: 800, lineHeight: 1.3 }}>
-                          I can deliver accurate data for your business with access.
-                        </span>
-                      </div>
-
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '10px', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '0.2px', textTransform: 'uppercase' }}>Not an Agency.</div>
-                        <div style={{ textAlign: 'right' }}>
-                          <div style={{ color: '#f8fafc', fontSize: '0.72rem', fontWeight: 700 }}>Jason <span style={{ color: '#94a3b8', fontSize: '0.6rem', fontWeight: 600 }}>(preferred name)</span></div>
-                          <div style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: 600, marginTop: '2px' }}>jagjit@jsonalytics.com</div>
-                          <div style={{ color: '#f8fafc', fontSize: '0.72rem', fontWeight: 600, marginTop: '2px' }}>WhatsApp: +91-8588006657</div>
-                        </div>
-                      </div>
-
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* ================= TAB: DEEP SCAN — access-free, the entire
-                  AUDIT->LOCATE->POINT->GUIDE diagnostic lives here and only
-                  here now. Just a URL, nothing store-specific. ================= */}
-              {activeTab === 'deepScan' && (
-                <div>
-                  <div style={{ marginBottom: '0.75rem' }}>
-                    <h2 style={{ fontSize: '0.95rem', margin: 0 }}>Deep Scan — Audit, Locate, Point, Guide</h2>
-                  </div>
-
-                  {/* Pure visual — no input, no button. Scanning starts
-                      automatically from the No Access tab's submission;
-                      this tab only ever displays whatever's already there. */}
                   {isScanning && (
                     <div style={{ marginBottom: '10px', color: '#94a3b8', fontSize: '0.85rem' }}>Scanning...</div>
                   )}
-                  {!isScanning && !scanResult && !scanError && (
-                    <div style={{ marginBottom: '10px', color: '#64748b', fontSize: '0.85rem' }}>No scan yet — enter a URL on the No Access tab.</div>
-                  )}
                   {scanError && (
-                    <div style={{ marginBottom: '10px', color: '#e8792c', fontSize: '0.82rem', backgroundColor: 'rgba(232,121,44,0.08)', border: '1px solid rgba(232,121,44,0.3)', borderRadius: '8px', padding: '10px 14px' }}>
-                      Error: {scanError}
+                    <div style={{ marginBottom: '10px', color: '#f8fafc', fontSize: '0.82rem', backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '10px 14px' }}>
+                      <strong style={{ fontWeight: 800 }}>Error:</strong> {scanError}
                     </div>
                   )}
 
-                  {renderDiagnosticResults()}
+                  {/* A password-gated store never actually gets scanned, so
+                      the normal diagnostic panel (which would otherwise show
+                      a misleading "no tracking found" verdict on an empty
+                      result) is replaced entirely by a clear prompt instead —
+                      never both at once. */}
+                  {!isScanning && validAuditDeepScan?.passwordProtected ? (
+                    <div style={{ marginBottom: '10px', color: '#f8fafc', fontSize: '0.85rem', backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '14px 16px' }}>
+                      <strong style={{ fontWeight: 900, fontSize: '0.95rem' }}>🔒 Password required.</strong> {validAuditDeepScan.error && validAuditDeepScan.error !== 'This store is password-protected. Enter the storefront password to scan it.' ? validAuditDeepScan.error + ' ' : ''}Enter the password above and press Enter (or Scan Store) to unlock and scan.
+                    </div>
+                  ) : (
+                    <>
+                      {scanResult && scanResult.status !== 'error' && (
+                        <div style={{ display: 'flex', gap: '4px', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                          {([
+                            ['overview', 'Overview'],
+                            ['evidence', 'Evidence Sources'],
+                            ['scope', 'Scope & Limitations'],
+                            ['recommendations', `Recommendations (${scanResult.recommendations.length})`],
+                            ['guided', `Manual Verification (${guidedChecks.length})`],
+                          ] as const).map(([key, label]) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => setDeepScanSection(key)}
+                              style={{
+                                backgroundColor: deepScanSection === key ? '#b45309' : '#1e293b',
+                                color: '#f8fafc',
+                                border: '1px solid #334155',
+                                padding: '6px 12px',
+                                borderRadius: '6px',
+                                fontSize: '0.74rem',
+                                fontWeight: deepScanSection === key ? 700 : 400,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {renderDiagnosticResults()}
+                    </>
+                  )}
 
-                  {scanResult && scanResult.status !== 'error' && (
-                    <details style={{ backgroundColor: '#1e293b', borderRadius: '10px', border: '1px solid #334155', padding: '0.6rem 0.75rem', marginTop: '0.6rem' }}>
-                      <summary style={{ cursor: 'pointer', fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>Guided next checks ({guidedChecks.length})</summary>
-                      <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
+                  {scanResult && scanResult.status !== 'error' && deepScanSection === 'guided' && (
+                    <div style={{ backgroundColor: '#1e293b', borderRadius: '10px', border: '1px solid #334155', padding: '1rem 1.25rem', marginTop: '0.6rem' }}>
+                      <div style={sectionLabelStyle}>Manual Verification ({guidedChecks.length})</div>
+                      {guidedChecks.length === 0 && (
+                        <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '10px' }}>No manual checks needed for this scan.</div>
+                      )}
+                      <div style={{ display: 'grid', gap: '6px', marginTop: '10px' }}>
                         {guidedChecks.map((check) => {
                           const recorded = guidedCheckOutcomes[check.id];
-                          const outcomeColor = recorded?.outcome === 'pass' ? '#f8fafc' : recorded?.outcome === 'fail' ? '#e8792c' : recorded?.outcome === 'unsure' ? '#b45309' : '#334155';
+                          // Monochrome by design (no color coding anywhere in
+                          // this app anymore), so the recorded outcome is
+                          // distinguished by brightness and border weight
+                          // instead: a confirmed failure is the loudest thing
+                          // on the card, a pass stays deliberately quiet.
+                          const outcomeColor = recorded?.outcome === 'fail' ? '#f8fafc' : recorded?.outcome === 'unsure' ? '#64748b' : recorded?.outcome === 'pass' ? '#94a3b8' : '#334155';
+                          const outcomeBorderWidth = recorded?.outcome === 'fail' ? '2px' : '1px';
                           return (
-                            <div key={check.id} style={{ backgroundColor: '#0f172a', border: `1px solid ${outcomeColor}`, borderRadius: '6px', padding: '8px 10px', fontSize: '0.72rem' }}>
-                              <div style={{ fontWeight: 700 }}>{check.title} <a href={resolveCheckHref(check)} target="_blank" rel="noreferrer" style={{ color: '#e8792c', marginLeft: '6px' }}>Open</a></div>
+                            <div key={check.id} style={{ backgroundColor: '#0f172a', border: `${outcomeBorderWidth} solid ${outcomeColor}`, borderRadius: '6px', padding: '8px 10px', fontSize: '0.72rem' }}>
+                              <div style={{ fontWeight: 700 }}>{check.title} <a href={resolveCheckHref(check)} target="_blank" rel="noreferrer" style={{ color: '#f8fafc', marginLeft: '6px' }}>Open</a></div>
                               <div style={{ color: '#94a3b8', marginTop: '4px' }}><strong>Where:</strong> {check.where} · <strong>Look for:</strong> {check.lookFor}</div>
                               <div style={{ color: '#f8fafc', marginTop: '4px' }}><strong>Good:</strong> {check.good}</div>
                               <div style={{ display: 'flex', gap: '5px', alignItems: 'center', marginTop: '8px', flexWrap: 'wrap' }}>
@@ -1307,7 +1271,7 @@ export default function App() {
                           );
                         })}
                       </div>
-                    </details>
+                    </div>
                   )}
                 </div>
               )}
@@ -1319,20 +1283,6 @@ export default function App() {
                   here at all — that's fully on the Deep Scan tab. ================= */}
               {activeTab === 'withAccess' && (
                 <div>
-                  <div style={{ marginBottom: '0.75rem' }}>
-                    <h2 style={{ fontSize: '0.95rem', margin: 0 }}>Store-Specific Access — Financial &amp; Live API Audit</h2>
-                  </div>
-
-                  {scanResult ? (
-                    <div style={{ color: '#94a3b8', fontSize: '0.78rem', marginBottom: '0.85rem' }}>
-                      Auditing <strong style={{ color: '#f8fafc' }}>{scanResult.url}</strong> — the diagnostic lives on the <strong>Deep Scan</strong> tab; this tab is financial data and connected-account reconciliation only.
-                    </div>
-                  ) : (
-                    <div style={{ color: '#94a3b8', fontSize: '0.78rem', marginBottom: '0.85rem' }}>
-                      No scan yet — run one on the <strong>Deep Scan</strong> tab first, then come back here for financial data and account connections.
-                    </div>
-                  )}
-
                   <div style={{ backgroundColor: '#1e293b', padding: '0.85rem 1rem', borderRadius: '10px', border: '1px solid #334155', marginBottom: '0.85rem' }}>
                     <form onSubmit={handleScan} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -1402,11 +1352,11 @@ export default function App() {
                       <div style={{ marginTop: '6px', color: '#94a3b8', fontSize: '0.68rem' }}>Loading GA4 properties…</div>
                     )}
                     {ga4PropertiesError && (
-                      <div style={{ marginTop: '6px', color: '#94a3b8', fontSize: '0.68rem' }}>Couldn't list GA4 properties — {ga4PropertiesError}. Enter the property ID manually above.</div>
+                      <div style={{ marginTop: '6px', color: '#94a3b8', fontSize: '0.68rem' }}>Couldn't list GA4 properties: {ga4PropertiesError}</div>
                     )}
                     {scanError && (
-                      <div style={{ marginTop: '12px', color: '#e8792c', fontSize: '0.82rem', backgroundColor: 'rgba(232,121,44,0.08)', border: '1px solid rgba(232,121,44,0.3)', borderRadius: '8px', padding: '10px 14px' }}>
-                        Error: {scanError}
+                      <div style={{ marginTop: '12px', color: '#f8fafc', fontSize: '0.82rem', backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '10px 14px' }}>
+                        <strong style={{ fontWeight: 800 }}>Error:</strong> {scanError}
                       </div>
                     )}
                   </div>
@@ -1429,19 +1379,18 @@ export default function App() {
                     </button>
                     <input type="date" aria-label="Shopify start date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={{ padding: '9px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#f8fafc', borderRadius: '8px' }} />
                     <input type="date" aria-label="Shopify end date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={{ padding: '9px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#f8fafc', borderRadius: '8px' }} />
-                    {shopifyPullError && <span style={{ color: '#e8792c', fontSize: '0.78rem' }}>Error: {shopifyPullError}</span>}
+                    {shopifyPullError && <span style={{ color: '#f8fafc', fontSize: '0.78rem' }}><strong style={{ fontWeight: 800 }}>Error:</strong> {shopifyPullError}</span>}
                     {csvInputs && !shopifyPullError && (
                       <span style={{ color: '#f8fafc', fontSize: '0.78rem' }}>Using {csvInputs.totalOrders} order{csvInputs.totalOrders === 1 ? '' : 's'}. Refunds, voids, and first-time customers still need your confirmed numbers below.</span>
                     )}
                     {!csvInputs && (
-                      <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>No order data loaded — audit will run tracking-only. Load CSV or pull live orders for financial metrics and the PDF report.</span>
+                      <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>No order data loaded, audit will run tracking-only.</span>
                     )}
                   </div>
 
                   {csvInputs && (
                     <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '12px', border: '1px solid #334155', marginBottom: '1rem' }}>
                       <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>Confirmed financial inputs</div>
-                      <div style={{ color: '#94a3b8', fontSize: '0.75rem', margin: '4px 0 10px' }}>Needed to calculate financial metrics — nothing here is estimated. RTO may be pre-filled as a suggestion below, but still needs your confirmation.</div>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: '10px' }}>
                         {([
                           ['cogs', 'COGS ($)'], ['shipping', 'Shipping cost ($)'], ['adSpend', 'Ad spend ($)'], ['settlementDays', 'Settlement days'], ['newCustomers', 'New customers (if missing)'], ['rtoOrders', 'RTO orders (if missing, 0 if none)'],
@@ -1450,7 +1399,7 @@ export default function App() {
                         ))}
                       </div>
                       {csvRtoSuggestion !== null && (
-                        <div style={{ color: '#b45309', fontSize: '0.72rem', marginTop: '8px' }}>
+                        <div style={{ color: '#f8fafc', fontSize: '0.72rem', marginTop: '8px' }}>
                           Suggested from CSV: {csvRtoSuggestion} order{csvRtoSuggestion === 1 ? '' : 's'} marked "restocked" by Shopify. This is a starting point, not a confirmed count — check it before scanning.
                         </div>
                       )}
@@ -1468,7 +1417,7 @@ export default function App() {
                       {Object.entries({ shopify: accessStatus.shopify.configured ? 'ready' : 'not-configured', ga4: accessStatus.ga4.connected ? 'connected' : 'not-configured', gtm: accessStatus.gtm.connected ? 'connected' : 'not-configured', dataLayer: validAuditDeepScan?.dataLayerPresent ? 'ready' : 'waiting', consent: validAuditDeepScan?.consent.found ? 'ready' : 'waiting' }).map(([key, value]) => (
                         <div key={key} style={{ backgroundColor: '#0f172a', borderRadius: '6px', padding: '6px 8px', border: '1px solid #334155' }}>
                           <div style={{ fontSize: '0.62rem', color: '#94a3b8', textTransform: 'uppercase' }}>{key}</div>
-                          <div style={{ marginTop: '3px', fontSize: '0.68rem', color: value === 'waiting' || value === 'not-configured' ? '#b45309' : '#f8fafc' }}>{getAdapterStateLabel(value as any)}</div>
+                          <div style={{ marginTop: '3px', fontSize: '0.68rem', color: '#f8fafc', fontWeight: value === 'waiting' || value === 'not-configured' ? 800 : 400 }}>{getAdapterStateLabel(value as any)}</div>
                         </div>
                       ))}
                     </div>
@@ -1477,15 +1426,31 @@ export default function App() {
                   <div style={{ backgroundColor: '#1e293b', padding: '0.6rem 0.75rem', borderRadius: '10px', border: '1px solid #334155', marginBottom: '0.6rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>dataLayer evidence</div>
-                      <button onClick={() => handleAuditDeepScan()} disabled={isAuditDeepScanning || !storeUrl} style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #334155', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.7rem' }}>{isAuditDeepScanning ? 'Scanning...' : 'Re-scan'}</button>
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        {validAuditDeepScan?.passwordProtected && (
+                          <input
+                            type="password"
+                            value={storefrontPassword}
+                            onChange={(e) => setStorefrontPassword(e.target.value)}
+                            placeholder="Storefront password"
+                            title="Only for a store you or a client have actually given you the password for, never used to guess access."
+                            autoFocus
+                            style={{ backgroundColor: '#0f172a', color: '#f8fafc', border: '1px solid #f8fafc', padding: '4px 8px', borderRadius: '6px', fontSize: '0.7rem', width: '170px' }}
+                          />
+                        )}
+                        <button onClick={() => handleAuditDeepScan()} disabled={isAuditDeepScanning || !storeUrl} style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #334155', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.7rem' }}>{isAuditDeepScanning ? 'Scanning...' : 'Re-scan'}</button>
+                      </div>
                     </div>
-                    {auditDeepScanError && <div style={{ color: '#e8792c', fontSize: '0.7rem', marginTop: '6px' }}>Error: {auditDeepScanError}</div>}
+                    {auditDeepScanError && <div style={{ color: '#f8fafc', fontSize: '0.7rem', marginTop: '6px' }}><strong style={{ fontWeight: 800 }}>Error:</strong> {auditDeepScanError}</div>}
                     {auditDeepScanStale && (
-                      <div style={{ color: '#b45309', fontSize: '0.68rem', marginTop: '6px' }}>Different URL — re-scan before auditing.</div>
+                      <div style={{ color: '#f8fafc', fontSize: '0.68rem', marginTop: '6px' }}>Different URL, re-scan before auditing.</div>
+                    )}
+                    {validAuditDeepScan?.passwordProtected && (
+                      <div style={{ color: '#f8fafc', fontSize: '0.72rem', marginTop: '6px', fontWeight: 800 }}>🔒 {validAuditDeepScan.error || 'This store is password-protected.'}</div>
                     )}
                     {validAuditDeepScan && (
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '6px', marginTop: '8px', fontSize: '0.7rem' }}>
-                        <div><span style={{ color: '#94a3b8' }}>dataLayer</span><div style={{ color: validAuditDeepScan.dataLayerPresent ? '#f8fafc' : '#b45309', marginTop: '2px' }}>{validAuditDeepScan.dataLayerPresent ? 'Detected' : 'Not detected'}</div></div>
+                        <div><span style={{ color: '#94a3b8' }}>dataLayer</span><div style={{ color: '#f8fafc', marginTop: '2px', fontWeight: validAuditDeepScan.dataLayerPresent ? 400 : 800 }}>{validAuditDeepScan.dataLayerPresent ? 'Detected' : 'Not detected'}</div></div>
                         <div><span style={{ color: '#94a3b8' }}>Events</span><div style={{ marginTop: '2px' }}>{auditDataLayerEvents.length ? auditDataLayerEvents.join(', ') : 'None readable'}</div></div>
                         <div><span style={{ color: '#94a3b8' }}>Ecommerce fields</span><div style={{ marginTop: '2px' }}>{auditEcommerceFields.length ? auditEcommerceFields.join(', ') : 'None readable'}</div></div>
                         <div><span style={{ color: '#94a3b8' }}>Consent &amp; server-side</span><div style={{ marginTop: '2px' }}>{validAuditDeepScan.consent.found ? 'Consent signal seen' : 'No consent signal'} · {validAuditDeepScan.trackingSignals.serverSideEndpointCandidates.length ? `server-side: ${validAuditDeepScan.trackingSignals.serverSideEndpointCandidates.join(', ')}` : 'no server-side endpoint seen'}</div></div>
@@ -1496,7 +1461,7 @@ export default function App() {
                   {(liveGa4 || liveGtmMatch || liveDataError) && (
                     <div style={{ backgroundColor: '#1e293b', padding: '0.6rem 0.75rem', borderRadius: '10px', border: '1px solid #334155', marginBottom: '0.6rem' }}>
                       <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', marginBottom: '6px' }}>Live API Confirmation</div>
-                      {liveDataError && <div style={{ color: '#e8792c', fontSize: '0.74rem', marginBottom: '6px' }}>{liveDataError}</div>}
+                      {liveDataError && <div style={{ color: '#f8fafc', fontSize: '0.74rem', marginBottom: '6px' }}>{liveDataError}</div>}
                       {liveGa4 && (
                         <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
                           GA4 (last 30d): {liveGa4.sessions} sessions, {liveGa4.totalUsers} users, {liveGa4.conversions} conversions, {formatCurrency(liveGa4.purchaseRevenue, region)} revenue
@@ -1505,7 +1470,7 @@ export default function App() {
                       {apiReconciliation.length > 0 && (
                         <div style={{ display: 'grid', gap: '5px', marginTop: '8px' }}>
                           {apiReconciliation.map((f, i) => (
-                            <div key={i} style={{ fontSize: '0.72rem', color: f.tone === 'good' ? '#f8fafc' : f.tone === 'bad' ? '#e8792c' : '#b45309', lineHeight: 1.35 }}>
+                            <div key={i} style={{ fontSize: '0.72rem', color: '#f8fafc', fontWeight: f.tone === 'bad' ? 800 : f.tone === 'warn' ? 700 : 400, lineHeight: 1.35 }}>
                               {f.text}
                             </div>
                           ))}
@@ -1531,7 +1496,7 @@ export default function App() {
               {/* ================= TAB 3: CLIENT REPORT ================= */}
               {activeTab === 'clientReport' && !scanResult && (
                 <div style={{ color: '#94a3b8', fontSize: '0.85rem' }}>
-                  No audit run yet — go to <strong>Deep Scan</strong> and run a scan first. Once that's done, the Report and Validation tabs populate here automatically.
+                  No audit run yet. Run a scan on <strong>Deep Scan</strong> first.
                 </div>
               )}
               {activeTab === 'clientReport' && scanResult && (
@@ -1576,7 +1541,7 @@ export default function App() {
                                 <h1 style={{ margin: '6px 0', fontSize: '1.6rem' }}>What's Been Fixed</h1>
                                 <div style={{ color: '#94a3b8', fontSize: '0.9rem' }}>{validationResult.url}</div>
                               </div>
-                              <div style={{ background: '#1e293b', borderLeft: '4px solid #e8792c', padding: '10px 12px', color: '#f8fafc', fontSize: '0.85rem', marginBottom: '18px' }}>
+                              <div style={{ background: '#1e293b', borderLeft: '4px solid #f8fafc', padding: '10px 12px', color: '#f8fafc', fontSize: '0.85rem', marginBottom: '18px' }}>
                                 To keep this accurate going forward: please don't modify the tracking setup covered below. Any other change to the store — installing a new app, a platform or theme update, a redesign — can affect tracking independently of this fix and may need a fresh check; that's outside the scope of what's validated here.
                               </div>
                               <h3 style={{ marginTop: 0 }}>Resolved ({diff.resolved.length})</h3>
@@ -1619,13 +1584,13 @@ export default function App() {
                                   </ol>
                                 </>
                               )}
-                              <div style={{ marginTop: '20px', padding: '12px', background: '#1e293b', borderLeft: '4px solid #e8792c', color: '#f8fafc', fontSize: '0.85rem' }}>
+                              <div style={{ marginTop: '20px', padding: '12px', background: '#1e293b', borderLeft: '4px solid #f8fafc', color: '#f8fafc', fontSize: '0.85rem' }}>
                                 Validated {new Date().toLocaleString()} — fresh evidence, same store, same credentials. Compared against the original Report tab by finding id.
                               </div>
                               <div style={{ marginTop: '24px', textAlign: 'center', fontSize: '1rem', fontWeight: 700, color: '#f8fafc' }}>Jason <span style={{ color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }}>(preferred name)</span></div>
-                              <div style={{ textAlign: 'center', fontSize: '1.15rem', fontWeight: 800, color: '#b45309', marginTop: '2px' }}>jagjit@jsonalytics.com</div>
+                              <div style={{ textAlign: 'center', fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc', marginTop: '2px' }}>jagjit@jsonalytics.com</div>
                               <div style={{ textAlign: 'center', fontSize: '1rem', fontWeight: 700, color: '#f8fafc', marginTop: '4px' }}>WhatsApp: +91-8588006657</div>
-                              <div style={{ textAlign: 'center', fontSize: '0.8rem', color: '#94a3b8', marginTop: '6px' }}>US account via Wise — universally accepted, easy international payment.</div>
+                              <div style={{ textAlign: 'center', fontSize: '0.8rem', color: '#94a3b8', marginTop: '6px' }}>US account via Wise. Universally accepted, easy international payment.</div>
                               <div style={{ textAlign: 'center', fontSize: '0.8rem', color: '#94a3b8', marginTop: '4px' }}>Ownership declaration available upon request.</div>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
@@ -1633,7 +1598,7 @@ export default function App() {
                               <button onClick={handleExportValidationPdf} disabled={isExportingPdf} style={{ backgroundColor: '#b45309', color: '#f8fafc', border: 'none', padding: '10px 20px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>{isExportingPdf ? 'Generating PDF...' : 'Export Validation PDF'}</button>
                             </div>
                             {validationError && (
-                              <div style={{ color: '#e8792c', fontSize: '0.82rem', backgroundColor: 'rgba(232,121,44,0.08)', border: '1px solid rgba(232,121,44,0.3)', borderRadius: '8px', padding: '10px 14px' }}>Error: {validationError}</div>
+                              <div style={{ color: '#f8fafc', fontSize: '0.82rem', backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '10px 14px' }}><strong style={{ fontWeight: 800 }}>Error:</strong> {validationError}</div>
                             )}
                           </>
                         );
@@ -1645,7 +1610,7 @@ export default function App() {
                         </div>
                         <button onClick={handleRunValidation} disabled={isRunningValidation} style={{ backgroundColor: '#b45309', color: '#f8fafc', border: 'none', padding: '10px 20px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>{isRunningValidation ? 'Running...' : 'Run Validation Scan'}</button>
                         {validationError && (
-                          <div style={{ marginTop: '12px', color: '#e8792c', fontSize: '0.82rem' }}>Error: {validationError}</div>
+                          <div style={{ marginTop: '12px', color: '#f8fafc', fontSize: '0.82rem' }}><strong style={{ fontWeight: 800 }}>Error:</strong> {validationError}</div>
                         )}
                       </div>
                     )

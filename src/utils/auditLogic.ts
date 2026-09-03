@@ -3,11 +3,11 @@
  * Priority: Functional Accuracy & Operator-Grade Reliability
  *
  * Two modes:
- *  - Tab 1 (No Access): runSurfaceAudit() — URL only, no credentials.
+ *  - runSurfaceAudit(): URL only, no credentials.
  *    Produces 7 business-metric cards, each either wired to a real surface
  *    signal (honest, hedged, ~80-90% directional accuracy) or explicitly
  *    locked "Needs live access" when no surface signal can imply it.
- *  - Tab 2 (With Access): runFullAudit() — GTM ID / GA4 ID / Shopify data
+ *  - runFullAudit() (With Access tab): GTM ID / GA4 ID / Shopify data
  *    required. Produces the full financial audit as a detailed text report
  *    (not cards) + a prioritized "look here first" triage list.
  */
@@ -142,14 +142,14 @@ export interface Ga4LiveMetrics {
   purchaseRevenue: number;
 }
 
-// ---- Surface-audit (Tab 1) types ----
+// ---- Surface-audit types ----
 
 export interface SurfaceMetricCard {
   label: string;
   value: string;
   tone: 'good' | 'warn' | 'bad';
   explainer: string; // 1-line, sales-call ready
-  locked?: boolean; // true = no surface signal can honestly imply this; needs Tab 2 access
+  locked?: boolean; // true = no surface signal can honestly imply this; needs With Access
   confidence?: string; // shown only on non-locked cards — honest about estimate vs measured
 }
 
@@ -166,6 +166,14 @@ export interface SurfaceAuditResult {
   tiktokPixelId: string | null;
   hasCmp: boolean;
   cmpName: string | null;
+  // Shopify's own native consent banner isn't a third-party CMP signature,
+  // so it never sets hasCmp — this is a separate, hedged signal: the page
+  // loads Shopify's consent-tracking-api/Customer Privacy API script.
+  // Confirmed real on 2 live stores, not universal Shopify boilerplate (see
+  // detectNativeCmpScript). Presence doesn't prove the banner is actually
+  // turned on in Admin, just that it's worth checking directly instead of
+  // trusting hasCmp alone.
+  hasNativeCmpScript: boolean;
   sslValid: boolean;
   missingSignalCount: number; // out of 4 (GTM, GA4, Meta, TikTok) — the "core" set the score is built on
   blindSpotPct: number;
@@ -242,6 +250,22 @@ function detectCmp(html: string): { found: boolean; name: string | null } {
   return { found: false, name: null };
 }
 
+// Shopify's own native consent banner (Settings > Customer Privacy) isn't a
+// third-party script, so it was never on CMP_PATTERNS and got silently
+// mislabeled as "no CMP" — confirmed live 2026-08-29: wilsondorset.com and
+// ripplimpactgear.com, both flagged no-cmp-with-active-tags, actually load
+// Shopify's own consent-tracking-api / Customer Privacy API script. Checked
+// against 9 other stores (drinkzyn, autobrush, unrivaledpet, and 6 more) —
+// only 3 of 11 had this signature, so it's a real, meaningful signal, not
+// baseline theme noise every Shopify store carries. Script presence alone
+// does NOT prove the banner is actually turned on and gating in Admin —
+// stays a hedged signal, not a hasCmp flip.
+const NATIVE_CMP_PATTERN = /consent-tracking-api|customer-privacy|customerPrivacy/i;
+
+function detectNativeCmpScript(html: string): boolean {
+  return NATIVE_CMP_PATTERN.test(html);
+}
+
 function escapeHtml(input: string): string {
   return String(input)
     .replace(/&/g, '&amp;')
@@ -315,8 +339,10 @@ function extractContactSignals(html: string): SurfaceAuditResult['contactSignals
   };
 }
 
-async function scanStoreHtml(storeUrl: string): Promise<{
+async function scanStoreHtml(storeUrl: string, password?: string): Promise<{
   html: string;
+  passwordProtected?: boolean;
+  passwordError?: string;
   gtmId: string | null;
   gtmIdsAll: string[];
   ga4Id: string | null;
@@ -326,6 +352,7 @@ async function scanStoreHtml(storeUrl: string): Promise<{
   tiktokPixelId: string | null;
   hasCmp: boolean;
   cmpName: string | null;
+  hasNativeCmpScript: boolean;
   hasLegacyUa: boolean;
   legacyUaId: string | null;
   hasPinterestTag: boolean;
@@ -337,14 +364,16 @@ async function scanStoreHtml(storeUrl: string): Promise<{
   googleAdsConversionId: string | null;
   contactSignals: SurfaceAuditResult['contactSignals'];
 }> {
-  const res = await fetch(`${PROXY_BASE}/scan?url=${encodeURIComponent(storeUrl)}`);
+  const qs = new URLSearchParams({ url: storeUrl });
+  if (password) qs.set('password', password);
+  const res = await fetch(`${PROXY_BASE}/scan?${qs.toString()}`);
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw errorFromResponseBody(body, `Proxy returned ${res.status}`);
   }
 
-  const { html } = await res.json();
+  const { html, passwordProtected, error: passwordErrorMsg } = await res.json();
 
   const gtmIdsAll = Array.from(new Set((html.match(/GTM-[A-Z0-9]+/g) as string[] | null) || []));
   // Real GA4 IDs are always exactly "G-" + 10 alphanumeric chars, and are
@@ -366,6 +395,7 @@ async function scanStoreHtml(storeUrl: string): Promise<{
   const hasTiktokPixel = /ttq\.load\s*\(/.test(html);
   const tiktokPixelMatch = html.match(/ttq\.load\(\s*['"]([A-Z0-9]{10,})['"]/i);
   const cmp = detectCmp(html);
+  const hasNativeCmpScript = detectNativeCmpScript(html);
 
   // Legacy Universal Analytics — stopped processing data in July 2023, but
   // real stores that have been live a while routinely still have the old
@@ -393,6 +423,8 @@ async function scanStoreHtml(storeUrl: string): Promise<{
 
   return {
     html,
+    passwordProtected,
+    passwordError: passwordErrorMsg,
     gtmId: gtmIdsAll[0] || null,
     gtmIdsAll,
     ga4Id: ga4Match,
@@ -402,6 +434,7 @@ async function scanStoreHtml(storeUrl: string): Promise<{
     tiktokPixelId: tiktokPixelMatch ? tiktokPixelMatch[1] : null,
     hasCmp: cmp.found,
     cmpName: cmp.name,
+    hasNativeCmpScript,
     hasLegacyUa: !!legacyUaMatch,
     legacyUaId: legacyUaMatch ? legacyUaMatch[0] : null,
     hasPinterestTag,
@@ -512,7 +545,7 @@ export function buildSurfaceCards(
     // removed the repeated "Credentials Safe" status line entirely, not
     // just hid it) — the trust pitch lives once in the banner above the
     // card grid (App.tsx), and the explainer alone carries each card now.
-    // (Stage 2's real businessMetrics array is where region legitimately
+    // (The real businessMetrics array is where region legitimately
     // sharpens interpretation — of measured numbers, not guesses.)
     {
       label: 'Gross Revenue',
@@ -547,7 +580,7 @@ export function buildSurfaceCards(
       label: 'Gross Margin',
       value: '',
       tone: 'good',
-      explainer: 'After product cost and shipping, is there real margin left — or just revenue?',
+      explainer: 'After product cost and shipping, is there real margin left, or just revenue?',
       locked: true,
     },
     {
@@ -593,11 +626,12 @@ export function buildSurfaceCards(
  */
 export const runSurfaceAudit = async (
   storeUrl: string,
-  region: Region = 'US'
+  region: Region = 'US',
+  password?: string
 ): Promise<SurfaceAuditResult> => {
   let scan: Awaited<ReturnType<typeof scanStoreHtml>>;
   try {
-    scan = await scanStoreHtml(storeUrl);
+    scan = await scanStoreHtml(storeUrl, password);
   } catch (err: any) {
     return {
       url: storeUrl,
@@ -612,6 +646,39 @@ export const runSurfaceAudit = async (
       tiktokPixelId: null,
       hasCmp: false,
       cmpName: null,
+      hasNativeCmpScript: false,
+      sslValid: false,
+      missingSignalCount: 4,
+      blindSpotPct: 100,
+      cards: [],
+      hasLegacyUa: false,
+      legacyUaId: null,
+      hasPinterestTag: false,
+      pinterestTagId: null,
+      hasSnapchatPixel: false,
+      snapchatPixelId: null,
+      hasMicrosoftUet: false,
+      hasGoogleAdsConversion: false,
+      googleAdsConversionId: null,
+      contactSignals: { socialLinks: [], contactEmail: null, aboutOrContactPageUrl: null },
+    };
+  }
+
+  if (scan.passwordProtected) {
+    return {
+      url: storeUrl,
+      status: 'error',
+      error: scan.passwordError || 'This store is password-protected.',
+      gtmId: null,
+      gtmIdsAll: [],
+      ga4Id: null,
+      hasMetaPixel: false,
+      metaPixelId: null,
+      hasTiktokPixel: false,
+      tiktokPixelId: null,
+      hasCmp: false,
+      cmpName: null,
+      hasNativeCmpScript: false,
       sslValid: false,
       missingSignalCount: 4,
       blindSpotPct: 100,
@@ -649,6 +716,7 @@ export const runSurfaceAudit = async (
     tiktokPixelId: scan.tiktokPixelId,
     hasCmp: scan.hasCmp,
     cmpName: scan.cmpName,
+    hasNativeCmpScript: scan.hasNativeCmpScript,
     sslValid,
     missingSignalCount: effective.missingSignalCount,
     blindSpotPct: effective.blindSpotPct,
@@ -717,12 +785,12 @@ export const runFullAudit = async (
   const recommendations: AuditDashboardResult['recommendations'] = [];
   recommendations.push(
     gtmId
-      ? { type: 'success', text: `Google Tag Manager container (${gtmId}) confirmed${scan.gtmId ? ' on the live page' : deepEvidence ? ' via deep-scan network evidence, not present in static HTML' : ' — manually supplied, not detected in live HTML'}.` }
+      ? { type: 'success', text: `Google Tag Manager container (${gtmId}) confirmed${scan.gtmId ? ' on the live page' : deepEvidence ? ' via deep-scan network evidence, not present in static HTML' : ', manually supplied, not detected in live HTML'}.` }
       : { type: 'warning', text: 'No Google Tag Manager container detected or supplied.' }
   );
   recommendations.push(
     ga4Id
-      ? { type: 'success', text: `GA4 measurement ID (${ga4Id}) confirmed${scan.ga4Id ? ' on the live page' : deepEvidence ? ' via deep-scan network evidence, not present in static HTML' : ' — manually supplied, not detected in live HTML'}.` }
+      ? { type: 'success', text: `GA4 measurement ID (${ga4Id}) confirmed${scan.ga4Id ? ' on the live page' : deepEvidence ? ' via deep-scan network evidence, not present in static HTML' : ', manually supplied, not detected in live HTML'}.` }
       : { type: 'warning', text: 'No GA4 measurement ID detected or supplied.' }
   );
   recommendations.push(
@@ -738,7 +806,7 @@ export const runFullAudit = async (
   recommendations.push(
     scan.hasCmp
       ? { type: 'success', text: `Consent management tool detected (${scan.cmpName}).` }
-      : { type: 'warning', text: `No consent tool detected — possible risk under ${REGIONS[region].label} privacy rules, verify manually before claiming compliance.` }
+      : { type: 'warning', text: `No consent tool detected, possible risk under ${REGIONS[region].label} privacy rules, verify manually before claiming compliance.` }
   );
   // These 3 are outside the "core 4" score — absence isn't flagged (not
   // every store runs Pinterest/Snapchat/Microsoft Ads), but presence is
@@ -756,10 +824,10 @@ export const runFullAudit = async (
     recommendations.push({ type: 'success', text: 'Microsoft Ads (UET) tag detected.' });
   }
   if (scan.hasGoogleAdsConversion) {
-    recommendations.push({ type: 'success', text: `Google Ads conversion tag detected${scan.googleAdsConversionId ? ` (${scan.googleAdsConversionId})` : ''} — commonly set up via the "Google & YouTube" app, separate from GTM/GA4.` });
+    recommendations.push({ type: 'success', text: `Google Ads conversion tag detected${scan.googleAdsConversionId ? ` (${scan.googleAdsConversionId})` : ''}, commonly set up via the "Google & YouTube" app, separate from GTM/GA4.` });
   }
   if (scan.hasLegacyUa) {
-    recommendations.push({ type: 'info', text: `Legacy Universal Analytics snippet still present (${scan.legacyUaId}) — stopped collecting data in July 2023, safe to remove, but adds noise when auditing what's actually tracking.` });
+    recommendations.push({ type: 'info', text: `Legacy Universal Analytics snippet still present (${scan.legacyUaId}), stopped collecting data in July 2023, safe to remove, but adds noise when auditing what's actually tracking.` });
   }
   if (audit) {
     recommendations.push({
@@ -769,13 +837,13 @@ export const runFullAudit = async (
     if (audit.burnRateUnsustainable) {
       recommendations.push({
         type: 'warning',
-        text: 'Ad spend currently exceeds gross margin — burn rate is unsustainable at this volume.',
+        text: 'Ad spend currently exceeds gross margin, burn rate is unsustainable at this volume.',
       });
     }
   } else {
     recommendations.push({
       type: 'info',
-      text: 'No order data loaded yet — financial metrics (RTO, COD, burn rate) need Shopify order data (CSV upload or live pull) to compute.',
+      text: 'No order data loaded yet. Financial metrics (RTO, COD, burn rate) need Shopify order data (CSV upload or live pull) to compute.',
     });
   }
 
@@ -799,7 +867,7 @@ export const runFullAudit = async (
           category: 'Runtime data layer',
           owner: 'Tracking / GTM configuration',
           severity: 'high',
-          statement: 'dataLayer contents are set by JavaScript after load and are not visible in a static HTML scan — needs a headless browser check to confirm. Run the deep scan before auditing for stronger evidence.',
+          statement: 'dataLayer contents are set by JavaScript after load and are not visible in a static HTML scan, needs a headless browser check to confirm. Run the deep scan before auditing for stronger evidence.',
         },
     {
       category: 'Measurement source trust',
@@ -808,6 +876,15 @@ export const runFullAudit = async (
       statement: deepEvidence
         ? 'This combines a static surface scan with read-only deep-scan network evidence — still not an authenticated pull from GA4/GTM APIs, so treat it as a strong signal, not final proof.'
         : 'This is a surface scan, not an authenticated pull from GA4/GTM APIs — treat it as a first signal, not final proof.',
+    },
+    {
+      // Previously only existed as internal API text (DeepScanResult.note)
+      // that nothing in the UI ever rendered — added here 2026-08-30 so the
+      // viewer actually sees it, not just the raw API response.
+      category: 'Server-side conversion tracking (CAPI)',
+      owner: 'Meta / Google Conversions API',
+      severity: 'medium',
+      statement: 'This scan only observes what a browser can see. Server-side event delivery (Meta Conversions API, Google Ads server-side tagging) happens directly between your server and the ad platform and cannot be verified by any browser-based scan, no exceptions. Confirm CAPI setup and match quality directly in Meta Events Manager or Google Ads.',
     },
   ];
 
@@ -833,12 +910,12 @@ export const runFullAudit = async (
   // leak regardless of volume; the framing just adjusts for high volume.
   const topLeak = rankedLeaks[0];
   const volumeNote = !audit || !inputs
-    ? 'No order data loaded yet — this audit covers tracking evidence only. Load Shopify order data (CSV upload or live pull) to see financial leaks and business metrics.'
+    ? 'No order data loaded yet. This audit covers tracking evidence only. Load Shopify order data (CSV upload or live pull) to see financial leaks and business metrics.'
     : topLeak && topLeak.amt > 0
       ? inputs.totalOrders >= 500
-        ? `High order volume (${inputs.totalOrders} orders) — don't audit product-by-product. Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}), the single largest leak, before anything else.`
-        : `Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}) — the single largest confirmed $ leak in this audit.`
-      : 'No major $ leaks flagged from the confirmed inputs — focus review on tracking coverage and the guided checks below.';
+        ? `High order volume (${inputs.totalOrders} orders), don't audit product-by-product. Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}), the single largest leak, before anything else.`
+        : `Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}), the single largest confirmed $ leak in this audit.`
+      : 'No major $ leaks flagged from the confirmed inputs. Focus review on tracking coverage and the guided checks below.';
 
   const isCodTypicalMarket = COD_TYPICAL_MARKETS.includes(region);
 
@@ -861,6 +938,7 @@ export const runFullAudit = async (
       tiktokPixelId: scan.tiktokPixelId,
       hasCmp: scan.hasCmp,
       cmpName: scan.cmpName,
+      hasNativeCmpScript: scan.hasNativeCmpScript,
       sslValid: storeUrl.trim().toLowerCase().startsWith('https://'),
       missingSignalCount: effective.missingSignalCount,
       blindSpotPct: effective.blindSpotPct,
@@ -901,29 +979,29 @@ export const runFullAudit = async (
       label: 'Meta Pixel',
       value: effective.metaDetected ? 'Detected' : 'Not detected',
       tone: effective.metaDetected ? 'good' : 'warn',
-      note: effective.metaDetected && !scan.hasMetaPixel ? 'Detected via deep-scan network evidence only — not present in static HTML.' : undefined,
+      note: effective.metaDetected && !scan.hasMetaPixel ? 'Detected via deep-scan network evidence only, not present in static HTML.' : undefined,
     },
     {
       label: 'TikTok Pixel',
       value: effective.tiktokDetected ? 'Detected' : 'Not detected',
       tone: effective.tiktokDetected ? 'good' : 'warn',
-      note: effective.tiktokDetected && !scan.hasTiktokPixel ? 'Detected via deep-scan network evidence only — not present in static HTML.' : undefined,
+      note: effective.tiktokDetected && !scan.hasTiktokPixel ? 'Detected via deep-scan network evidence only, not present in static HTML.' : undefined,
     },
     {
       label: 'Consent Tool (CMP)',
       value: scan.hasCmp ? `Detected (${scan.cmpName})` : 'Not detected',
       tone: scan.hasCmp ? 'good' : 'warn',
-      note: scan.hasCmp ? undefined : 'Verify manually — may use a native/custom banner not in the signature list.',
+      note: scan.hasCmp ? undefined : 'Verify manually, may use a native/custom banner not in the signature list.',
     },
   ];
 
   // businessMetrics degrades to an honest "Unaccessed" state when no order
-  // data has been loaded — same pattern as Stage 1's locked cards, never a
+  // data has been loaded, same pattern as the locked surface cards, never a
   // computed number off inputs that don't exist.
   const businessMetrics = audit
     ? [
         { label: 'Gross Revenue', value: formatCurrency(audit.grossRevenue, region), explainer: 'Total order value before any costs are subtracted — your top-line number.' },
-        { label: 'ROAS', value: `${audit.roas.toFixed(2)}x`, explainer: `For every ${formatCurrency(1, region)} spent on ads, how many came back in revenue — below 1x means ads are losing money outright.` },
+        { label: 'ROAS', value: `${audit.roas.toFixed(2)}x`, explainer: `For every ${formatCurrency(1, region)} spent on ads, how many came back in revenue, below 1x means ads are losing money outright.` },
         { label: 'CAC', value: formatCurrency(audit.cac, region), explainer: 'What it costs in ad spend alone to acquire one new customer.' },
         { label: 'Gross Margin', value: formatCurrency(audit.grossMargin, region), explainer: "What's left after product cost and shipping — before ad spend and other overhead." },
         {
@@ -941,7 +1019,7 @@ export const runFullAudit = async (
             : 'Share of orders paid cash-on-delivery — uncommon in this market, so a non-zero figure is worth confirming is intentional.',
         },
         { label: 'Settlement Lag (cash locked)', value: formatCurrency(audit.settlementLag, region), explainer: "Cash tied up waiting for COD payments to actually settle — money you've technically earned but can't spend yet." },
-        { label: 'Cash Flow Health', value: `${audit.netOutcome >= 0 ? 'Healthy' : 'At Risk'}`, explainer: "Whether gross margin actually covers ad spend — 'At Risk' means you're spending more on ads than you're making before overhead." },
+        { label: 'Cash Flow Health', value: `${audit.netOutcome >= 0 ? 'Healthy' : 'At Risk'}`, explainer: "Whether gross margin actually covers ad spend, 'At Risk' means you're spending more on ads than you're making before overhead." },
       ]
     : [
         { label: 'Gross Revenue', value: 'Unaccessed — load order data to see this', explainer: 'Total order value before any costs are subtracted — your top-line number.' },
@@ -988,7 +1066,7 @@ export const runFullAudit = async (
     report: {
       headline: 'Purchase path measurement audit',
       storeMode: 'Live surface scan',
-      status: signalsFound >= 2 ? 'Core tags detected — validate purchase event next' : 'Tracking gaps found on page load',
+      status: signalsFound >= 2 ? 'Core tags detected, validate purchase event next' : 'Tracking gaps found on page load',
       // Evidence caveats (purchase-event proof, static-scan blind spots) live in
       // scopeNotes below ("Runtime data layer" / "Measurement source trust") —
       // this summary states what was scanned and found, not a second copy of them.
@@ -1241,7 +1319,7 @@ export async function fetchGtmContainerMatch(gtmId: string | null): Promise<{ ma
   return match ? { matched: true, containerName: match.name } : { matched: false };
 }
 
-// ---- Live GA4/GTM API reconciliation (Tab 2) ----
+// ---- Live GA4/GTM API reconciliation (With Access) ----
 // "GA4 API connected" is not the same claim as "storefront GA4 implementation
 // is correct." This compares what the connected GA4/GTM accounts actually
 // report against what was observed on the storefront, and only states a
@@ -1276,7 +1354,7 @@ export function reconcileLiveApiEvidence(
       if (deep && !hasEcommerceEvidence) {
         findings.push({
           tone: 'warn',
-          text: `GA4 reports ${liveGa4.conversions} conversions / ${formatCurrency(liveGa4.purchaseRevenue, region)} revenue for this window, but the storefront deep scan found no ecommerce dataLayer fields on page load. This isn't a contradiction by itself (conversions happen at checkout, not the homepage) — but if GA4 revenue doesn't reconcile with Shopify order totals for the same window, check how GA4 is receiving purchase data.`,
+          text: `GA4 reports ${liveGa4.conversions} conversions / ${formatCurrency(liveGa4.purchaseRevenue, region)} revenue for this window, but the storefront deep scan found no ecommerce dataLayer fields on page load. This isn't a contradiction by itself (conversions happen at checkout, not the homepage), but if GA4 revenue doesn't reconcile with Shopify order totals for the same window, check how GA4 is receiving purchase data.`,
         });
       } else {
         findings.push({ tone: 'good', text: `GA4 reports real conversions (${liveGa4.conversions}) and revenue (${formatCurrency(liveGa4.purchaseRevenue, region)}) for this window.` });
@@ -1294,13 +1372,13 @@ export function reconcileLiveApiEvidence(
         const sign = diffPct >= 0 ? '+' : '';
         findings.push({
           tone: 'warn',
-          text: `GA4 revenue (${formatCurrency(liveGa4.purchaseRevenue, region)}) vs. confirmed Shopify revenue (${formatCurrency(result.metrics.grossRevenue, region)}) for this audit: ${sign}${diffPct.toFixed(0)}% difference. Only a fair comparison if both used the same date range — refunds, currency conversion, and attribution timing can also explain a gap. Reconcile the date ranges before treating this as a tracking problem.`,
+          text: `GA4 revenue (${formatCurrency(liveGa4.purchaseRevenue, region)}) vs. confirmed Shopify revenue (${formatCurrency(result.metrics.grossRevenue, region)}) for this audit: ${sign}${diffPct.toFixed(0)}% difference. Only a fair comparison if both used the same date range, refunds, currency conversion, and attribution timing can also explain a gap. Reconcile the date ranges before treating this as a tracking problem.`,
         });
       }
     } else if (result.metrics.ga4Active && liveGa4.sessions === 0) {
       findings.push({
         tone: 'warn',
-        text: 'GA4 shows 0 sessions in this window despite a GA4 tag being detected on the storefront. For a genuinely low-traffic dev/test store this can be entirely accurate — confirm against a known test visit before concluding tracking is broken.',
+        text: 'GA4 shows 0 sessions in this window despite a GA4 tag being detected on the storefront. For a genuinely low-traffic dev/test store this can be entirely accurate, confirm against a known test visit before concluding tracking is broken.',
       });
     }
   }
@@ -1325,12 +1403,23 @@ export interface DeepScanResult {
     microsoftUetBrowserRequests: number;
     serverSideEndpointCandidates: string[];
   };
-  observedIds: { ga4: string[]; gtm: string[] };
+  // meta/tiktok/ads are optional — cached leads.json evidence captured before
+  // this field existed only ever has {ga4, gtm}, so every reader must treat
+  // them as possibly absent, not just possibly empty.
+  observedIds: { ga4: string[]; gtm: string[]; meta?: string[]; tiktok?: string[]; ads?: string[] };
+  /** Optional — absent on cached evidence captured before this field existed. True/false is a direct measurement (see server.cjs); absent means "not tested," not "passed." */
+  queryParamPreservedThroughLoad?: boolean;
+  /** True when the scan landed on Shopify's password splash instead of the real storefront — every other field is empty because of that, not because tracking is absent. */
+  passwordProtected?: boolean;
+  /** Present when passwordProtected is true — tells the operator what to do next, not a hard failure. */
+  error?: string;
   note: string;
 }
 
-export async function fetchDeepScan(storeUrl: string): Promise<DeepScanResult> {
-  const res = await fetch(`${PROXY_BASE}/scan/deep?url=${encodeURIComponent(storeUrl)}`);
+export async function fetchDeepScan(storeUrl: string, password?: string): Promise<DeepScanResult> {
+  const qs = new URLSearchParams({ url: storeUrl });
+  if (password) qs.set('password', password);
+  const res = await fetch(`${PROXY_BASE}/scan/deep?${qs.toString()}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw errorFromResponseBody(body, `Deep scan request failed (${res.status})`);
@@ -1361,14 +1450,14 @@ export function buildReportHtml(scanResult: AuditDashboardResult, region: Region
          Report deliverable; the fix steps belong in the Validation PDF,
          after the client is actually paying. Split into Confirmed/Worth
          Confirming (same partitionEdgeCases split as the on-screen Report
-         and Stage 2's own Top Issues view) so the confidence gap between a
+         and the Deep Scan tab own Top Issues view) so the confidence gap between a
          measured finding and a low-confidence one reads clearly on the
          page itself, without needing a call to explain it. -->
     ${scanResult.report.topIssues.issues.length === 0
       ? '<p>No confirmed issues from the evidence gathered for this audit.</p>'
       : (() => {
           const issueRow = (i: typeof scanResult.report.topIssues.issues[number]) =>
-            `<li><b>${escapeHtml(i.title)}</b> (${escapeHtml(i.severity)})${i.amount ? ` — ${escapeHtml(formatCurrency(i.amount, region))}` : ''}: ${escapeHtml(i.detail)}</li>`;
+            `<li><b>${escapeHtml(i.title)}</b> (${escapeHtml(i.severity)})${i.amount ? `, ${escapeHtml(formatCurrency(i.amount, region))}` : ''}: ${escapeHtml(i.detail)}</li>`;
           const confirmed = scanResult.report.topIssues.issues.filter((i) => !i.possibleReasons || i.possibleReasons.length === 0);
           const worthConfirming = scanResult.report.topIssues.issues.filter((i) => i.possibleReasons && i.possibleReasons.length > 0);
           return `

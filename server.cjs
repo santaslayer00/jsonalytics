@@ -36,6 +36,7 @@ const app = express();
 // the implementation and its direct unit tests.
 const { assertScannableUrl, safeFetch } = require('./lib/ssrfGuard.cjs');
 const { fetchWithRateLimitRetry } = require('./lib/shopifyFetch.cjs');
+const { redactPII } = require('./lib/piiRedaction.cjs');
 const LOCAL_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
 app.use(cors({
   origin(origin, callback) {
@@ -142,8 +143,34 @@ gtmOauth2Client.on('tokens', (tokens) => {
 });
 
 // ---- Storefront HTML scan (Tab 1 - No Access) ----
+// Storefront password unlock — only ever used when the operator explicitly
+// supplies a password they already have (their own dev store, or a client's
+// staging site). Never used to guess/brute-force access. This authenticates
+// viewing access only, it does not mutate any store data, so it's a
+// different category from the "never click/submit/mutate" rule, which is
+// about not creating carts/orders on a store's real data.
+async function unlockStorefrontPassword(target, password) {
+  const origin = new URL(target).origin;
+  const passwordUrl = `${origin}/password`;
+  await assertScannableUrl(passwordUrl);
+  const body = new URLSearchParams({ form_type: 'storefront_password', password });
+  const response = await fetch(passwordUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    },
+    body: body.toString(),
+    redirect: 'manual',
+  });
+  const setCookie = response.headers.get('set-cookie');
+  if (!setCookie) return null;
+  // Strip cookie attributes (Path/Expires/etc.), keep just the name=value pairs for reuse.
+  return setCookie.split(/,(?=[^ ]+?=)/).map((c) => c.split(';')[0]).join('; ');
+}
+
 app.get('/api/scan', async (req, res) => {
-  const { url } = req.query;
+  const { url, password } = req.query;
   if (!url) return res.status(400).json({ error: 'Missing url param' });
 
   let target = url.trim();
@@ -156,11 +183,22 @@ app.get('/api/scan', async (req, res) => {
   }
 
   try {
+    let unlockCookie = null;
+    if (password) {
+      try {
+        unlockCookie = await unlockStorefrontPassword(target, password);
+      } catch (err) {
+        return res.status(400).json({ error: 'Could not reach the password page.', detail: err.message });
+      }
+    }
     // safeFetch re-validates every redirect hop, not just the original URL —
     // a same-origin-looking store that 302s to a private IP would otherwise
     // sail past the assertScannableUrl check above.
     const response = await safeFetch(target, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ...(unlockCookie ? { Cookie: unlockCookie } : {}),
+      },
     });
 
     if (!response.ok) {
@@ -174,6 +212,23 @@ app.get('/api/scan', async (req, res) => {
     }
 
     const html = await response.text();
+    // Shopify serves its password splash as a normal 200, so response.ok
+    // alone can't tell "empty page, no tracking" apart from "never actually
+    // reached the storefront." Detected via the final URL (fetch follows
+    // redirects, response.url is the post-redirect landing page) or the
+    // password form's own signature, so an empty result never gets
+    // silently mistaken for "no tracking installed."
+    const isPasswordPage = /\/password(\?|$)/.test(response.url) || /name=["']password["']/.test(html) && /storefront_password/.test(html);
+    if (isPasswordPage) {
+      return res.status(200).json({
+        url: target,
+        html,
+        passwordProtected: true,
+        error: unlockCookie
+          ? 'The password did not unlock this store. Double-check it and try again.'
+          : 'This store is password-protected. Enter the storefront password to scan it.',
+      });
+    }
     res.json({ url: target, html });
   } catch (err) {
     res.status(502).json({ error: 'Could not reach store', detail: err.message });
@@ -182,13 +237,14 @@ app.get('/api/scan', async (req, res) => {
 
 // ---- Deep scan: real headless-browser check (Tab 1 - No Access, no credentials needed) ----
 app.get('/api/scan/deep', async (req, res) => {
-  const { url } = req.query;
+  const { url, password } = req.query;
   if (!url) return res.status(400).json({ error: 'Missing url param' });
   let target = url.trim();
   if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
 
   try {
     await assertScannableUrl(target);
+    if (password) await assertScannableUrl(`${new URL(target).origin}/password`);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
@@ -230,6 +286,30 @@ app.get('/api/scan/deep', async (req, res) => {
       return r.continue().catch(() => {});
     });
 
+    if (password) {
+      // Use the real storefront password form (rather than reconstructing
+      // Shopify's cookie manually) so the browser's own cookie jar carries
+      // the unlock through to the actual scan navigation below. Runs after
+      // interception is armed so this navigation gets the same per-redirect
+      // SSRF validation as the main scan.
+      // Submits the form's own submit() method from inside the page, no
+      // simulated pointer click — keeps this route's blanket ban on click
+      // calls (tests/audit-safety.test.cjs) intact rather than carving an
+      // exception into it, since that test exists precisely to catch any
+      // future accidental cart/checkout click, not just this one.
+      const passwordUrl = `${new URL(target).origin}/password`;
+      await page.goto(passwordUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
+        page.evaluate((pwd) => {
+          const input = document.querySelector('input[name="password"]');
+          const form = input ? input.closest('form') : document.querySelector('form[action*="password"], #login_form');
+          if (input) input.value = pwd;
+          if (form) form.submit();
+        }, password),
+      ]);
+    }
+
     // networkidle2 (wait for <=2 in-flight connections) sounds right for
     // "let tracking scripts settle," but real sites commonly never reach it
     // at all: live-chat widgets, retargeting beacons, and websocket
@@ -241,21 +321,85 @@ app.get('/api/scan/deep', async (req, res) => {
     // background traffic; the fixed settle delay after it gives GTM/GA4/
     // pixel scripts time to initialize and fire their first requests,
     // which is what this scan actually needs to observe.
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    // Query-param-survival check — a safe proxy for "would this store lose a
+    // real Google Ads gclid on the way in." Appends an obviously-synthetic
+    // param (never a real ad-platform identifier, so nothing meaningful ever
+    // reaches a third party) and checks whether it's still on the URL after
+    // navigation/redirects settle. If a generic param gets dropped, a real
+    // gclid almost certainly would too — same redirect/normalization
+    // mechanism, just without ever firing a live signal at Google's own
+    // conversion endpoint under someone else's ad account (see 2026-08-30
+    // discussion: that direct approach was ruled out as a real safety-model
+    // change, this is the safe alternative that gets the same evidence).
+    const QS_TEST_PARAM = '_jsonalytics_qs_test';
+    const QS_TEST_VALUE = 'v1';
+    const targetWithTestParam = new URL(target);
+    targetWithTestParam.searchParams.set(QS_TEST_PARAM, QS_TEST_VALUE);
+
+    await page.goto(targetWithTestParam.toString(), { waitUntil: 'domcontentloaded', timeout: 20000 });
     await new Promise((resolve) => setTimeout(resolve, 4000));
 
-    const dataLayerContents = await page.evaluate(() => {
+    // Same reasoning as /api/scan — Shopify's password splash is a normal
+    // 200 page, so an empty result here needs to say WHY it's empty rather
+    // than looking identical to "no tracking installed."
+    let landedOnPasswordPage = false;
+    try {
+      landedOnPasswordPage = /\/password(\?|$)/.test(page.url());
+    } catch { /* leave false */ }
+    if (!landedOnPasswordPage) {
+      landedOnPasswordPage = await page.evaluate(() => {
+        try {
+          return !!document.querySelector('input[name="password"]') && document.body.innerHTML.includes('storefront_password');
+        } catch { return false; }
+      }).catch(() => false);
+    }
+    if (landedOnPasswordPage) {
+      await browser.close();
+      return res.status(200).json({
+        url: target,
+        dataLayer: null,
+        dataLayerPresent: false,
+        consent: { found: false, raw: null },
+        trackingRequestsSeen: [],
+        eventEvidence: [],
+        trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] },
+        observedIds: { ga4: [], gtm: [], meta: [], tiktok: [], ads: [] },
+        queryParamPreservedThroughLoad: false,
+        passwordProtected: true,
+        error: password
+          ? 'The password did not unlock this store. Double-check it and try again.'
+          : 'This store is password-protected. Enter the storefront password to scan it.',
+        note: 'Read-only page-load inspection. It does not click Add to Cart, submit forms, create carts, or validate purchase/CAPI/deduplication. Those require intentional test-checkout or imported evidence.',
+      });
+    }
+
+    let queryParamPreservedThroughLoad = false;
+    try {
+      queryParamPreservedThroughLoad = new URL(page.url()).searchParams.get(QS_TEST_PARAM) === QS_TEST_VALUE;
+    } catch { /* leave false — couldn't read the final URL, treat as unproven not as a pass */ }
+
+    // Redacted immediately after capture, before it's used to derive
+    // eventEvidence or sent anywhere — PII never leaves this scope raw.
+    // See lib/piiRedaction.cjs for what's covered and why this exists.
+    const dataLayerContents = redactPII(await page.evaluate(() => {
       try { return Array.isArray(window.dataLayer) ? window.dataLayer.slice(0, 25) : null; }
       catch { return null; }
-    });
+    }));
 
-    const consentSignals = await page.evaluate(() => {
+    const consentSignals = redactPII(await page.evaluate(() => {
       try {
+        // Google's real gtag.js does `dataLayer.push(arguments)` — arguments
+        // is array-LIKE (numeric keys + length), not a true array, so
+        // Array.isArray(e) was false for every real gtag consent call and
+        // this never fired. Checking e[0] directly works for both a true
+        // array and an arguments-shaped object, and plain dataLayer pushes
+        // (e.g. {event: 'purchase', ...}) have no '0' key so they're
+        // naturally excluded without needing the Array.isArray guard at all.
         const dl = Array.isArray(window.dataLayer) ? window.dataLayer : [];
-        const consentEvent = dl.find(e => Array.isArray(e) && e[0] === 'consent');
+        const consentEvent = dl.find(e => e && e[0] === 'consent');
         return { found: !!consentEvent, raw: consentEvent || null };
       } catch { return { found: false, raw: null }; }
-    });
+    }));
 
     // Intentionally read-only: no clicks, form submissions, cart mutations, or checkout navigation.
     // Events below are only evidence observed during the initial page load.
@@ -304,6 +448,33 @@ app.get('/api/scan/deep', async (req, res) => {
       const m = u.match(/[?&]id=(GTM-[A-Z0-9]+)/);
       return m ? [m[1]] : [];
     }))];
+    // Meta's base pixel always fires to facebook.com/tr?id=<PIXEL_ID> — the id
+    // param IS the pixel ID (documented Meta behavior), not an internal token.
+    const observedMetaIds = [...new Set(capturedRequests.flatMap((u) => {
+      if (!/facebook\.com\/tr/i.test(u)) return [];
+      try {
+        const id = new URL(u).searchParams.get('id');
+        return id && /^\d{6,}$/.test(id) ? [id] : [];
+      } catch { return []; }
+    }))];
+    // TikTok's Shopify-channel pixel loader (analytics.tiktok.com/i18n/pixel/
+    // shopify.js?sdkid=...) — confirmed via TikTok's own docs that sdkid IS the
+    // Pixel ID, not a separate SDK/session token, before relying on it here.
+    const observedTiktokIds = [...new Set(capturedRequests.flatMap((u) => {
+      if (!/tiktok\.com\/i18n\/pixel/i.test(u)) return [];
+      try {
+        const sdkid = new URL(u).searchParams.get('sdkid');
+        return sdkid ? [sdkid] : [];
+      } catch { return []; }
+    }))];
+    // Same tid= param as GA4 above, but AW- prefixed — Google Ads conversion
+    // IDs share the collect endpoint with GA4, filtered the other direction.
+    const observedAdsIds = [...new Set(capturedRequests.flatMap((u) => {
+      try {
+        const tid = new URL(u).searchParams.get('tid');
+        return tid && /^AW-/i.test(tid) ? [tid] : [];
+      } catch { return []; }
+    }))];
 
     await browser.close();
 
@@ -324,7 +495,8 @@ app.get('/api/scan/deep', async (req, res) => {
         microsoftUetBrowserRequests: capturedRequests.filter((u) => /bat\.bing\.com/i.test(u)).length,
         serverSideEndpointCandidates,
       },
-      observedIds: { ga4: observedGa4Ids, gtm: observedGtmIds },
+      observedIds: { ga4: observedGa4Ids, gtm: observedGtmIds, meta: observedMetaIds, tiktok: observedTiktokIds, ads: observedAdsIds },
+      queryParamPreservedThroughLoad,
       note: 'Read-only page-load inspection. It does not click Add to Cart, submit forms, create carts, or validate purchase/CAPI/deduplication. Those require intentional test-checkout or imported evidence.',
     });
   } catch (err) {
@@ -372,7 +544,7 @@ async function getShopifyAccessToken() {
   if (shopifyTokens?.access_token) {
     return shopifyTokens.access_token;
   }
-  throw new Error('Shopify is not connected yet — visit /api/shopify/auth first, or set SHOPIFY_ACCESS_TOKEN in .env if you have a static custom-app token.');
+  throw new Error('Shopify is not connected yet. Visit /api/shopify/auth first, or set SHOPIFY_ACCESS_TOKEN in .env if you have a static custom-app token.');
 }
 
 app.get('/api/shopify/orders', async (req, res) => {
@@ -553,7 +725,7 @@ app.get('/api/ga4/callback', async (req, res) => {
 // Only surfaces properties already shared with this account; it can't
 // discover a property nobody's granted access to.
 app.get('/api/ga4/properties', async (req, res) => {
-  if (!ga4Tokens) return res.status(401).json({ error: 'GA4 not connected yet — visit /api/ga4/auth first' });
+  if (!ga4Tokens) return res.status(401).json({ error: 'GA4 not connected yet, visit /api/ga4/auth first' });
   try {
     oauth2Client.setCredentials(ga4Tokens);
     const response = await oauth2Client.request({
@@ -577,7 +749,7 @@ app.get('/api/ga4/properties', async (req, res) => {
 app.get('/api/ga4/report', async (req, res) => {
   const { propertyId, startDate = '30daysAgo', endDate = 'today' } = req.query;
   if (!propertyId) return res.status(400).json({ error: 'Missing propertyId param' });
-  if (!ga4Tokens) return res.status(401).json({ error: 'GA4 not connected yet — visit /api/ga4/auth first' });
+  if (!ga4Tokens) return res.status(401).json({ error: 'GA4 not connected yet, visit /api/ga4/auth first' });
 
   try {
     oauth2Client.setCredentials(ga4Tokens);
@@ -626,7 +798,7 @@ app.get('/api/gtm/callback', async (req, res) => {
 });
 
 app.get('/api/gtm/containers', async (req, res) => {
-  if (!gtmTokens) return res.status(401).json({ error: 'GTM not connected yet — visit /api/gtm/auth first' });
+  if (!gtmTokens) return res.status(401).json({ error: 'GTM not connected yet, visit /api/gtm/auth first' });
 
   try {
     gtmOauth2Client.setCredentials(gtmTokens);

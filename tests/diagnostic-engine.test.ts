@@ -16,6 +16,7 @@ function baseSurface(overrides: Partial<SurfaceAuditResult> = {}): SurfaceAuditR
     tiktokPixelId: null,
     hasCmp: false,
     cmpName: null,
+    hasNativeCmpScript: false,
     sslValid: true,
     missingSignalCount: 4,
     blindSpotPct: 100,
@@ -251,6 +252,29 @@ test('no-cmp-with-active-tags still fires normally from static evidence — requ
   const finding = report.findings.find((f) => f.id === 'no-cmp-with-active-tags');
   assert.ok(finding);
   assert.equal(finding!.requiresDeepScan, false);
+});
+
+// Real gap found live (2026-08-29): wilsondorset.com and ripplimpactgear.com
+// were both flagged no-cmp-with-active-tags, but their raw HTML actually
+// loads Shopify's own consent-tracking-api/Customer Privacy API script —
+// a real, checkable signature this rule was blind to, silently treating
+// "no third-party CMP" as "no consent handling at all."
+test('no-cmp-with-active-tags reorders possibleReasons and softens language when Shopify\'s native consent script is detected', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false, hasNativeCmpScript: true });
+  const report = runDiagnostics(surface, null);
+  const finding = report.findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  assert.ok(finding, 'expected the finding to still fire — script presence alone does not flip hasCmp');
+  assert.match(finding.doesNotProve, /native consent-tracking script/);
+  assert.match(finding.possibleReasons[0].cause, /Shopify's own built-in consent banner is enabled/);
+  assert.match(finding.observed.join(' '), /consent-tracking-api/);
+});
+
+test('no-cmp-with-active-tags keeps the original generic possibleReasons order when no native script is detected', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false, hasNativeCmpScript: false });
+  const report = runDiagnostics(surface, null);
+  const finding = report.findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  assert.match(finding.possibleReasons[0].cause, /Genuinely no consent tool configured anywhere/);
+  assert.doesNotMatch(finding.observed.join(' '), /consent-tracking-api/);
 });
 
 // Same class of gap, same fix pattern, checked on the sibling rule.
