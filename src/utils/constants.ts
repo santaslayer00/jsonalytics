@@ -1,4 +1,4 @@
-export type Region = 'US' | 'UK' | 'CA' | 'AU' | 'IN';
+export type Region = 'US' | 'UK' | 'CA' | 'AU' | 'IN' | 'NZ';
 
 export interface RegionConfig {
   code: Region;
@@ -50,5 +50,13 @@ export const REGIONS: Record<Region, RegionConfig> = {
     locale: 'en-IN',
     tlds: ['.in', '.co.in', '.net.in'],
     privacyTerm: 'DPDP-aligned',
+  },
+  NZ: {
+    code: 'NZ',
+    label: 'New Zealand',
+    currency: 'NZD',
+    locale: 'en-NZ',
+    tlds: ['.co.nz', '.nz', '.org.nz'],
+    privacyTerm: 'Privacy Act 2020-aligned',
   },
 };

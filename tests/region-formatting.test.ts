@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { REGIONS } from '../src/utils/constants.ts';
 import { formatCurrency, detectRegionFromUrl } from '../src/utils/formatters.ts';
 
-test('required markets are exactly US/UK/CA/AU/IN', () => {
-  assert.deepEqual(Object.keys(REGIONS).sort(), ['AU', 'CA', 'IN', 'UK', 'US']);
+test('required markets are exactly US/UK/CA/AU/IN/NZ', () => {
+  assert.deepEqual(Object.keys(REGIONS).sort(), ['AU', 'CA', 'IN', 'NZ', 'UK', 'US']);
 });
 
 test('each region has a distinct currency and a privacy term used in report language', () => {
@@ -27,7 +27,7 @@ test('formatCurrency uses the selected region currency, not a hard-coded $', () 
 });
 
 test('formatCurrency works for every target market without throwing, including CA and AU which were previously unasserted', () => {
-  for (const region of ['US', 'UK', 'CA', 'AU', 'IN'] as const) {
+  for (const region of ['US', 'UK', 'CA', 'AU', 'IN', 'NZ'] as const) {
     const formatted = formatCurrency(1234.5, region);
     assert.ok(formatted.length > 0, `${region} produced an empty/invalid currency string`);
     assert.doesNotMatch(formatted, /NaN|undefined/, `${region} formatted currency incorrectly: ${formatted}`);
@@ -38,6 +38,7 @@ test('detectRegionFromUrl maps a .ca domain to Canada, not UAE (dropped market)'
   assert.equal(detectRegionFromUrl('https://mystore.ca'), 'CA');
   assert.equal(detectRegionFromUrl('https://mystore.co.uk'), 'UK');
   assert.equal(detectRegionFromUrl('https://mystore.in'), 'IN');
+  assert.equal(detectRegionFromUrl('https://mystore.co.nz'), 'NZ');
 });
 
 test('detectRegionFromUrl returns null (not a fake US default) when there is no real signal — so callers never clobber a manual region pick', () => {

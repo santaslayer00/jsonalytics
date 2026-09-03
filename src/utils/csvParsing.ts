@@ -157,6 +157,7 @@ export function parseShopifyOrdersCsv(text: string): CSVParseResult {
       else if (order.country === 'GB') detectedReg = 'UK';
       else if (order.country === 'AU') detectedReg = 'AU';
       else if (order.country === 'CA') detectedReg = 'CA';
+      else if (order.country === 'NZ') detectedReg = 'NZ';
 
       if (detectedReg) {
         regionCounts.set(detectedReg, (regionCounts.get(detectedReg) || 0) + 1);
