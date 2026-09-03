@@ -51,6 +51,22 @@ Access" surface/deep scan tabs — those only need a store URL.
 `.env` and `tokens.json` (where OAuth tokens get cached after you connect
 GA4/GTM) are both gitignored. Never commit or share either file.
 
+### Meta Ad Library search (lead sourcing)
+
+Optional — powers the "Find leads via Meta Ad Library" search in the Lead
+Register tab. Requires a `META_AD_LIBRARY_TOKEN` in `.env`:
+
+1. Go to [developers.facebook.com](https://developers.facebook.com), create
+   an app (choose a generic/non-advertising type).
+2. Complete Meta's identity verification for Ad Library API access — this is
+   the real gate, tied to your own account, not just an app-review checkbox.
+3. In Graph API Explorer, generate a user access token with `ads_read`
+   permission and put it in `.env` as `META_AD_LIBRARY_TOKEN`.
+
+Without this set, the search box shows a clear "not configured" message
+instead of failing silently. Rate limit: 200 calls/hour per token (Meta's
+limit, not enforced separately by this app).
+
 ## Scripts
 
 | Command | What it does |

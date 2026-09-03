@@ -30,6 +30,8 @@ export interface Lead {
   updatedAt: string;
   /** Cached evidence from the last scan run from the Leads tab. Null/absent until "Scan"/"Re-scan" is clicked — never written silently. */
   lastScan?: LeadScanCache | null;
+  /** The scan before lastScan, shifted into place server-side whenever a new lastScan lands (see server.cjs). One level of history — enough to catch tracking that broke between two scans, not a full audit trail. Null/absent until a lead has been scanned twice. */
+  previousScan?: LeadScanCache | null;
 }
 
 const PROXY_BASE = '/api';
@@ -69,4 +71,24 @@ export async function updateLead(id: string, patch: Partial<Pick<Lead, 'status' 
 export async function deleteLead(id: string): Promise<void> {
   const res = await fetch(`${PROXY_BASE}/leads/${encodeURIComponent(id)}`, { method: 'DELETE' });
   await readJsonOrThrow(res);
+}
+
+export interface AdLibraryResult {
+  id: string;
+  page_name?: string;
+  /** Links to Meta's own archived-ad preview page, NOT the advertiser's website — never use this to extract a candidate store URL. */
+  ad_snapshot_url?: string;
+  ad_creative_link_captions?: string[];
+  ad_creative_link_titles?: string[];
+  ad_creative_link_descriptions?: string[];
+  ad_delivery_start_time?: string;
+}
+
+/** Raw Meta Ad Library results for a keyword search — caller is responsible for
+ * pulling a candidate store URL out of ad_creative_link_captions/titles (the
+ * fields that actually carry destination-domain text) before scanning it. */
+export async function searchAdLibrary(searchTerms: string, countries = 'US,CA,AU,NZ,GB'): Promise<AdLibraryResult[]> {
+  const res = await fetch(`${PROXY_BASE}/adlibrary/search?searchTerms=${encodeURIComponent(searchTerms)}&countries=${encodeURIComponent(countries)}`);
+  const body = await readJsonOrThrow(res);
+  return body.data || [];
 }

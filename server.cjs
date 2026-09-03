@@ -842,6 +842,56 @@ app.get('/api/gtm/inspect', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'GTM inspection failed', detail: err.message }); }
 });
 
+// ---- Meta Ad Library search (lead sourcing) ----
+// Requires META_AD_LIBRARY_TOKEN in .env — a user access token with
+// ads_read scope, generated after completing Meta's identity verification
+// for Ad Library API access (developers.facebook.com, not something this
+// server can obtain on its own). No SSRF guard needed here — this only ever
+// calls Meta's own fixed host with server-constructed params, it never
+// takes an arbitrary operator-supplied URL the way /api/scan does.
+app.get('/api/adlibrary/search', async (req, res) => {
+  const { searchTerms, countries = 'US,CA,AU,NZ,GB' } = req.query;
+  if (!searchTerms) return res.status(400).json({ error: 'Missing searchTerms param' });
+  if (!process.env.META_AD_LIBRARY_TOKEN) {
+    return res.status(401).json({ error: 'Meta Ad Library not configured, set META_AD_LIBRARY_TOKEN in .env (see README for the identity-verification setup steps)' });
+  }
+
+  const countryList = String(countries).split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
+  // ad_creative_link_captions/titles carry the advertiser's actual
+  // destination domain text far more often than page_name does — page_name
+  // is the Facebook Page's display name, not the store URL.
+  const fields = [
+    'page_name',
+    'page_id',
+    'ad_snapshot_url',
+    'ad_creative_link_captions',
+    'ad_creative_link_titles',
+    'ad_creative_link_descriptions',
+    'ad_delivery_start_time',
+  ].join(',');
+
+  const url = new URL('https://graph.facebook.com/v19.0/ads_archive');
+  url.searchParams.set('search_terms', String(searchTerms));
+  url.searchParams.set('ad_type', 'ALL');
+  url.searchParams.set('ad_active_status', 'ACTIVE');
+  url.searchParams.set('ad_reached_countries', JSON.stringify(countryList));
+  url.searchParams.set('fields', fields);
+  url.searchParams.set('limit', '5');
+  url.searchParams.set('access_token', process.env.META_AD_LIBRARY_TOKEN);
+
+  try {
+    const response = await fetch(url.toString());
+    const data = await response.json();
+    if (!response.ok) {
+      return res.status(response.status).json({ error: 'Meta Ad Library request failed', detail: data.error || data });
+    }
+    res.json(data);
+  } catch (err) {
+    console.error('Ad Library search error:', err.message);
+    res.status(500).json({ error: 'Ad Library search failed', detail: err.message });
+  }
+});
+
 // ---- Lead register endpoints ----
 app.get('/api/leads', (_req, res) => {
   res.json({ leads, statuses: LEAD_STATUSES });
@@ -889,8 +939,16 @@ app.patch('/api/leads/:id', (req, res) => {
   if (storeName !== undefined) lead.storeName = typeof storeName === 'string' ? storeName : lead.storeName;
   // lastScan is a cache blob written by the trusted local frontend (already
   // evidence gathered through the SSRF-guarded scan endpoints) — stored
-  // as-is rather than deep-validated field by field.
-  if (lastScan !== undefined) lead.lastScan = lastScan;
+  // as-is rather than deep-validated field by field. Before overwriting,
+  // shift the outgoing lastScan into previousScan — one level of history,
+  // enough to catch tracking that broke between two scans of the same store
+  // (theme update, app uninstall, etc.) without building a full audit trail.
+  // Skipped on a lead's first-ever scan (lead.lastScan is still null then),
+  // so previousScan never gets set to a meaningless null.
+  if (lastScan !== undefined) {
+    if (lead.lastScan) lead.previousScan = lead.lastScan;
+    lead.lastScan = lastScan;
+  }
   lead.updatedAt = new Date().toISOString();
 
   saveLeads(leads);

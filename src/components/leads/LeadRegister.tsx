@@ -1,16 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import {
   fetchLeads,
+  createLead,
   updateLead,
   deleteLead,
+  searchAdLibrary,
   LEAD_STATUSES,
   LEAD_STATUS_LABELS,
 } from '../../utils/leadsApi';
-import type { Lead, LeadStatus } from '../../utils/leadsApi';
+import type { Lead, LeadStatus, AdLibraryResult } from '../../utils/leadsApi';
 import { runSurfaceAudit, fetchDeepScan } from '../../utils/auditLogic';
 import { runDiagnostics, getFindingCategory } from '../../utils/diagnosticEngine';
 import type { DiagnosticSeverity } from '../../utils/diagnosticEngine';
-import { formatRelativeTime } from '../../utils/formatters';
+import { formatRelativeTime, detectRegionFromUrl } from '../../utils/formatters';
 import type { Region } from '../../utils/constants';
 
 const statusColor: Record<LeadStatus, string> = {
@@ -32,6 +34,50 @@ const severityColor: Record<DiagnosticSeverity, string> = {
   low: '#94a3b8',
   info: '#94a3b8',
 };
+
+// Outreach timing — local to this component, only matters at the point of
+// contacting a lead. Send windows were previously worked out by hand per
+// lead (Rippl Impact Gear: held for 1:30 PM IST to land at 9 AM UK time);
+// this computes the same thing for every lead instead of redoing the math
+// each time. OPERATOR_TZ assumes IST, matching that precedent.
+const OPERATOR_TZ = 'Asia/Kolkata';
+const SEND_WINDOW_LOCAL_HOUR = 9; // 9 AM local — the UK-9AM precedent above
+const REGION_TIMEZONES: Record<Region, { tz: string; label: string }> = {
+  US: { tz: 'America/New_York', label: 'US · ET' },
+  UK: { tz: 'Europe/London', label: 'UK' },
+  CA: { tz: 'America/Toronto', label: 'Canada · ET' },
+  AU: { tz: 'Australia/Sydney', label: 'Australia · Sydney' },
+  IN: { tz: 'Asia/Kolkata', label: 'India · IST' },
+  NZ: { tz: 'Pacific/Auckland', label: 'New Zealand' },
+};
+
+function zonedParts(date: Date, timeZone: string): { hour: number; minute: number } {
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone, hour12: false, hour: '2-digit', minute: '2-digit' });
+  const parts = Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
+  return { hour: parseInt(parts.hour, 10), minute: parseInt(parts.minute, 10) };
+}
+
+// Next UTC instant at which `timeZone` reads `hour`:00 local, on or after
+// `now`. Re-measures the offset after each adjustment rather than trusting
+// a single guess, so it converges correctly across DST without a hardcoded
+// offset table.
+function nextLocalHour(timeZone: string, hour: number, now: Date): Date {
+  let t = now.getTime();
+  for (let i = 0; i < 3; i++) {
+    const { hour: h, minute: m } = zonedParts(new Date(t), timeZone);
+    t += ((hour - h) * 60 - m) * 60000;
+  }
+  if (t <= now.getTime()) {
+    t += 24 * 3600 * 1000;
+    const { hour: h, minute: m } = zonedParts(new Date(t), timeZone);
+    t += ((hour - h) * 60 - m) * 60000;
+  }
+  return new Date(t);
+}
+
+function formatZoned(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true }).format(date);
+}
 
 function leadOutreachRank(lead: Lead): number {
   if (!lead.lastScan) return -1; // unscanned sinks below every scanned lead, scanned or clean
@@ -56,6 +102,11 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ region }) => {
   const [scanningIds, setScanningIds] = useState<Set<string>>(new Set());
   const [bulkProgress, setBulkProgress] = useState<string | null>(null);
   const [isScanningAll, setIsScanningAll] = useState(false);
+  const [adLibTerms, setAdLibTerms] = useState('');
+  const [adLibCountries, setAdLibCountries] = useState('US,CA,AU,NZ,GB');
+  const [adLibResults, setAdLibResults] = useState<AdLibraryResult[]>([]);
+  const [isSearchingAdLib, setIsSearchingAdLib] = useState(false);
+  const [addingAdLibId, setAddingAdLibId] = useState<string | null>(null);
 
   const load = async () => {
     setIsLoading(true);
@@ -170,6 +221,57 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ region }) => {
     }
   };
 
+  // Pulls a plausible bare domain out of Ad Library's link caption/title
+  // text (e.g. "Shop Now at mystore.com") — these fields carry the
+  // advertiser's actual destination text; page_name is just the Facebook
+  // Page's display name and is not reliably a URL at all.
+  const extractCandidateUrl = (result: AdLibraryResult): string | null => {
+    const texts = [
+      ...(result.ad_creative_link_captions || []),
+      ...(result.ad_creative_link_titles || []),
+      ...(result.ad_creative_link_descriptions || []),
+    ];
+    for (const text of texts) {
+      const match = text.match(/([a-z0-9-]+\.)+[a-z]{2,}(\/[^\s]*)?/i);
+      if (match) return match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
+    }
+    return null;
+  };
+
+  const handleAdLibSearch = async () => {
+    if (!adLibTerms.trim()) return;
+    setIsSearchingAdLib(true);
+    setError(null);
+    setAdLibResults([]);
+    try {
+      setAdLibResults(await searchAdLibrary(adLibTerms.trim(), adLibCountries));
+    } catch (err: any) {
+      setError(err.message || 'Ad Library search failed.');
+    } finally {
+      setIsSearchingAdLib(false);
+    }
+  };
+
+  // Adds the lead, then immediately runs the same real deep-scan pipeline
+  // handleScan already uses — never registers on the Ad Library hit alone,
+  // matches the standing "deep-scan gated" lead-sourcing rule.
+  const handleAddFromAdLib = async (result: AdLibraryResult) => {
+    const url = extractCandidateUrl(result);
+    if (!url) { setError('No usable URL found in this ad\'s link text — skip or check it manually.'); return; }
+    setAddingAdLibId(result.id);
+    setError(null);
+    try {
+      const lead = await createLead(url, 'not_contacted', result.page_name || '');
+      setLeads((prev) => [...prev, lead]);
+      await handleScan(lead);
+      setAdLibResults((prev) => prev.filter((r) => r.id !== result.id));
+    } catch (err: any) {
+      setError(err.message || `Could not add ${url}.`);
+    } finally {
+      setAddingAdLibId(null);
+    }
+  };
+
   // Auto-ranked: real gaps first, clean scans after, unscanned at the
   // bottom — so scanning a batch surfaces the ones actually worth
   // outreach without having to read every row. Ties keep creation order
@@ -213,6 +315,58 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ region }) => {
         </button>
         {bulkProgress && <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>{bulkProgress}</span>}
       </div>
+
+      <details style={{ backgroundColor: '#1e293b', borderRadius: '10px', border: '1px solid #334155', padding: '0.75rem 1rem', marginBottom: '1rem' }}>
+        <summary style={{ cursor: 'pointer', fontSize: '0.78rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Find leads via Meta Ad Library</summary>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '10px' }}>
+          <input
+            type="text"
+            placeholder="Keyword (e.g. jewellery, skincare)"
+            value={adLibTerms}
+            onChange={(e) => setAdLibTerms(e.target.value)}
+            style={{ flex: 3, minWidth: '200px', padding: '8px 10px', backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '6px', color: '#f8fafc', fontSize: '0.82rem', outline: 'none' }}
+          />
+          <input
+            type="text"
+            placeholder="Countries (comma-separated)"
+            value={adLibCountries}
+            onChange={(e) => setAdLibCountries(e.target.value)}
+            style={{ flex: 2, minWidth: '160px', padding: '8px 10px', backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '6px', color: '#f8fafc', fontSize: '0.82rem', outline: 'none' }}
+          />
+          <button
+            onClick={handleAdLibSearch}
+            disabled={isSearchingAdLib || !adLibTerms.trim()}
+            style={{ backgroundColor: '#b45309', color: '#f8fafc', border: 'none', padding: '0 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '0.82rem' }}
+          >
+            {isSearchingAdLib ? 'Searching...' : 'Search'}
+          </button>
+        </div>
+        <div style={{ color: '#64748b', fontSize: '0.72rem', marginTop: '6px' }}>
+          Returns up to 5 currently-active ads. Requires META_AD_LIBRARY_TOKEN set in .env (Meta identity verification required — see README).
+        </div>
+        {adLibResults.length > 0 && (
+          <div style={{ display: 'grid', gap: '6px', marginTop: '10px' }}>
+            {adLibResults.map((r) => {
+              const candidateUrl = extractCandidateUrl(r);
+              return (
+                <div key={r.id} style={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '6px', padding: '8px 10px', fontSize: '0.78rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  <div>
+                    <div style={{ color: '#f8fafc', fontWeight: 600 }}>{r.page_name || 'Unnamed advertiser'}</div>
+                    <div style={{ color: candidateUrl ? '#94a3b8' : '#e8792c' }}>{candidateUrl || 'No URL found in ad text — check manually'}</div>
+                  </div>
+                  <button
+                    onClick={() => handleAddFromAdLib(r)}
+                    disabled={!candidateUrl || addingAdLibId === r.id}
+                    style={{ backgroundColor: '#1e293b', color: '#f8fafc', border: '1px solid #334155', borderRadius: '6px', padding: '6px 12px', fontSize: '0.75rem', fontWeight: 600, cursor: candidateUrl ? 'pointer' : 'default', opacity: candidateUrl ? 1 : 0.5 }}
+                  >
+                    {addingAdLibId === r.id ? 'Adding + scanning...' : 'Add & scan'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </details>
 
       {error && (
         <div style={{ marginBottom: '12px', color: '#e8792c', fontSize: '0.82rem', backgroundColor: 'rgba(232,121,44,0.08)', border: '1px solid rgba(232,121,44,0.3)', borderRadius: '8px', padding: '10px 14px' }}>
@@ -275,6 +429,24 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ region }) => {
                 Added {new Date(lead.createdAt).toLocaleDateString()}
                 {lead.updatedAt !== lead.createdAt ? ` · updated ${new Date(lead.updatedAt).toLocaleDateString()}` : ''}
               </div>
+              {(() => {
+                const region = detectRegionFromUrl(lead.storeUrl);
+                if (!region) {
+                  return (
+                    <div style={{ color: '#64748b', fontSize: '0.7rem', marginTop: '4px' }}>
+                      Timezone: unknown — no country signal in the domain, check manually.
+                    </div>
+                  );
+                }
+                const { tz, label } = REGION_TIMEZONES[region];
+                const now = new Date();
+                const sendAt = nextLocalHour(tz, SEND_WINDOW_LOCAL_HOUR, now);
+                return (
+                  <div style={{ color: '#94a3b8', fontSize: '0.7rem', marginTop: '4px' }}>
+                    🌐 {label} · local now {formatZoned(now, tz)} · next 9 AM window {formatZoned(sendAt, tz)} (send at {formatZoned(sendAt, OPERATOR_TZ)} your time)
+                  </div>
+                );
+              })()}
               <input
                 type="text"
                 defaultValue={lead.notes}
@@ -336,6 +508,35 @@ export const LeadRegister: React.FC<LeadRegisterProps> = ({ region }) => {
                         <strong style={{ color: '#94a3b8' }}>{category}</strong>: {Array.from(fixTypes).join(' · ')}
                       </span>
                     ))}
+                  </div>
+                );
+              })()}
+              {/* Theme-update drift: previousScan is shifted into place
+                  server-side whenever a new lastScan lands (see server.cjs),
+                  so re-scanning the same store naturally builds one level of
+                  history — enough to catch tracking that broke silently
+                  between two scans (theme update, app uninstall) without a
+                  full audit trail. Only renders once a lead's been scanned
+                  twice; a newly-appeared cause is the actionable case, a
+                  resolved one is just informational. */}
+              {lead.lastScan && lead.previousScan && (() => {
+                const currentTags = new Set(lead.lastScan!.causeTags || []);
+                const previousTags = new Set(lead.previousScan!.causeTags || []);
+                const newlyBroken = [...currentTags].filter((t) => !previousTags.has(t));
+                const fixed = [...previousTags].filter((t) => !currentTags.has(t));
+                if (newlyBroken.length === 0 && fixed.length === 0) return null;
+                return (
+                  <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px dashed #334155', fontSize: '0.72rem', display: 'grid', gap: '4px' }}>
+                    {newlyBroken.length > 0 && (
+                      <div style={{ color: '#e8792c', fontWeight: 700 }}>
+                        ⚠ New since the scan {formatRelativeTime(lead.previousScan.scannedAt)}: {newlyBroken.map((t) => getFindingCategory(t).fixType).join(', ')}
+                      </div>
+                    )}
+                    {fixed.length > 0 && (
+                      <div style={{ color: '#94a3b8' }}>
+                        ✓ Resolved since the scan {formatRelativeTime(lead.previousScan.scannedAt)}: {fixed.map((t) => getFindingCategory(t).fixType).join(', ')}
+                      </div>
+                    )}
                   </div>
                 );
               })()}
