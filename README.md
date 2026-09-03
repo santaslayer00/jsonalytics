@@ -1,13 +1,15 @@
 # JSONalytics
 
-A Shopify tracking-audit tool. Point it at a storefront URL and it audits the
-real tracking/measurement pipeline — GTM, GA4, Meta Pixel, TikTok Pixel,
-dataLayer, consent signals — and follows the evidence upstream to the
-earliest meaningful failure instead of just listing what's present or absent.
+I fix broken Shopify tracking, GTM, GA4, Meta Pixel, TikTok Pixel, consent,
+server-side CAPI. This is the tool behind that work: point it at a storefront
+URL and it traces the real tracking/measurement pipeline back to the
+earliest real cause, instead of just listing what's present or absent, so
+the fix goes to the actual break, not a symptom.
 
-Operating philosophy: **AUDIT → LOCATE → POINT → GUIDE**. Every finding
-states what was observed, what it proves, what it does *not* prove, and what
-to check first. Nothing is inferred beyond what the evidence supports.
+Operating philosophy: **LOCATE → POINT → GUIDE**. Every finding states what
+was observed, what it proves, what it does *not* prove, and what to check
+first. Nothing is inferred beyond what the evidence supports, no fix
+recommendation without evidence behind it.
 
 ## Requirements
 
@@ -96,13 +98,13 @@ cloud-metadata address) before every scan. See `tests/ssrf-guard.test.cjs`.
 
 ## Markets
 
-The market selector (US / UK / CA / AU / IN) drives report currency
+The market selector (US / UK / CA / AU / IN / NZ) drives report currency
 formatting and privacy-law language (CCPA/CPRA, UK GDPR, PIPEDA, Australian
 Privacy Act, DPDP) — it is not cosmetic. See `src/utils/constants.ts`.
 
 ## Lead register
 
-The "Leads" tab is a lean pipeline tracker, separate from the audit engine —
+The "Leads" tab is a lean pipeline tracker, separate from the diagnostic engine —
 store URL, status (`Interested` / `Not interested` / `In queue` / `In
 progress`), optional notes. Persists to `leads.json` (same pattern as
 `tokens.json`: local file, gitignored, never committed). Not a CRM — no
