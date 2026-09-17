@@ -360,6 +360,7 @@ app.get('/api/scan/deep', async (req, res) => {
         dataLayer: null,
         dataLayerPresent: false,
         consent: { found: false, raw: null },
+        nativeBannerShouldShow: null,
         trackingRequestsSeen: [],
         eventEvidence: [],
         trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] },
@@ -401,6 +402,26 @@ app.get('/api/scan/deep', async (req, res) => {
       } catch { return { found: false, raw: null }; }
     }));
 
+    // Shopify's own Customer Privacy API — window.Shopify.customerPrivacy —
+    // exposes shouldShowBanner(), a real, documented method, confirmed live
+    // against shopify.dev, not guessed. Turns the old "check Admin manually"
+    // hedge for the native-banner possibility into actual measured evidence.
+    // Caveat kept deliberately: shouldShowBanner() reflects whether THIS
+    // visitor's detected region is one Shopify's regional privacy rules are
+    // configured to show a banner to — a false here can mean either "not
+    // configured anywhere" or "correctly configured for other regions, just
+    // not the one this scan's own server IP geolocates to." Same class of
+    // scan-origin dependency as the GA4 network-timing flakiness elsewhere in
+    // this file — real evidence, not a universal yes/no.
+    const nativeBannerShouldShow = await page.evaluate(() => {
+      try {
+        if (window.Shopify?.customerPrivacy?.shouldShowBanner) {
+          return window.Shopify.customerPrivacy.shouldShowBanner();
+        }
+        return null;
+      } catch { return null; }
+    }).catch(() => null);
+
     // Intentionally read-only: no clicks, form submissions, cart mutations, or checkout navigation.
     // Events below are only evidence observed during the initial page load.
     const eventEvidence = (dataLayerContents || []).flatMap((entry) => {
@@ -421,9 +442,22 @@ app.get('/api/scan/deep', async (req, res) => {
     // a genuinely custom one (treatyjewellery.com's own
     // "cantstopme.treatyjewellery.com" subdomain). Excluding the known
     // vendor domains leaves only the domains actually worth flagging.
+    //
+    // Bare "/collect?" was STILL too loose even after that fix — caught
+    // live 2026-09-12 on wilsondorset.com: swymrelay.com (Swym, a wishlist/
+    // back-in-stock app, nothing to do with tag management) has its own
+    // internal API at /api/v2/provider/collect?pid=..., which isn't a
+    // known tracking vendor so it sailed past the exclusion list above and
+    // got mislabeled as server-side tag tracking. The real problem: "any
+    // domain using the word collect in a path" is true of lots of unrelated
+    // SaaS APIs, not just tracking infrastructure, no exclusion list can
+    // keep up with every third-party app that happens to use that word.
+    // Dropped the bare pattern entirely — "/g/collect" and "/mp/collect"
+    // are specific enough (GA4's actual Measurement Protocol path
+    // convention) to keep without the same collision risk.
     const KNOWN_TRACKING_VENDOR_HOSTS = /(^|\.)(google-analytics\.com|analytics\.google\.com|googletagmanager\.com|doubleclick\.net|google\.com|googlesyndication\.com|merchant-center-analytics\.goog|facebook\.com|facebook\.net|tiktok\.com|pinimg\.com|sc-static\.net|snapchat\.com|bing\.com)$/i;
     const serverSideEndpointCandidates = [...new Set(capturedRequests
-      .filter((u) => /stape\.io|sgtm|server-side|\/g\/collect|\/mp\/collect|\/collect\?/i.test(u))
+      .filter((u) => /stape\.io|sgtm|server-side|\/g\/collect|\/mp\/collect/i.test(u))
       .map((u) => new URL(u).origin)
       .filter((origin) => !KNOWN_TRACKING_VENDOR_HOSTS.test(new URL(origin).hostname)))];
     if (serverSideEndpointCandidates.length > 0) {
@@ -483,10 +517,17 @@ app.get('/api/scan/deep', async (req, res) => {
       dataLayer: dataLayerContents,
       dataLayerPresent: !!dataLayerContents,
       consent: consentSignals,
+      nativeBannerShouldShow,
       trackingRequestsSeen: [...new Set(capturedRequests)],
       eventEvidence,
       trackingSignals: {
-        ga4Requests: capturedRequests.filter((u) => /google-analytics\.com|\/g\/collect|\/collect\?/i.test(u)).length,
+        // Bare "/collect?" dropped 2026-09-12 — same false-positive class as
+        // the server-side detector below: any unrelated third-party app
+        // (Swym's wishlist relay, confirmed live) with "collect" in its own
+        // API path inflated this count, which feeds anyObservedRequest and
+        // the GA4-confirmed check in diagnosticEngine.ts. "/g/collect" alone
+        // is GA4's actual Measurement Protocol path, specific enough to keep.
+        ga4Requests: capturedRequests.filter((u) => /google-analytics\.com|\/g\/collect/i.test(u)).length,
         gtmRequests: capturedRequests.filter((u) => /googletagmanager\.com\/gtm\.js/i.test(u)).length,
         metaBrowserRequests: capturedRequests.filter((u) => /facebook\.com\/tr/i.test(u)).length,
         tiktokBrowserRequests: capturedRequests.filter((u) => /tiktok\.com\/i18n\/pixel/i.test(u)).length,

@@ -179,6 +179,66 @@ export function runDiagnostics(
     });
   }
 
+  // R1c/R1d — individually gauge GA4 and GTM instead of only ever checking
+  // "is anything present at all." no-measurement-layer above only fires when
+  // EVERY platform is absent, so a store with Meta/TikTok pixels installed
+  // but no GA4 and no GTM at all previously fell through with no finding
+  // about that specific, real gap — it only ever got the generic no-CMP
+  // findings, because those just check "does any tag exist." Real case:
+  // dazzlingbeautysolution.com (2026-09-05) — Meta + TikTok both confirmed,
+  // GTM and GA4 both absent, and Priority Findings only ever mentioned CMP.
+  const ga4Confirmed = !!surface.ga4Id || (hasDeep && (deep!.observedIds.ga4.length > 0 || deep!.trackingSignals.ga4Requests > 0));
+  const gtmConfirmed = !!surface.gtmId || surface.gtmIdsAll.length > 0 || (hasDeep && (deep!.observedIds.gtm.length > 0 || deep!.trackingSignals.gtmRequests > 0));
+
+  if (hasDeep && !ga4Confirmed && (anyStaticTag || anyObservedRequest)) {
+    findings.push({
+      id: 'ga4-not-detected-with-partial-tracking',
+      severity: 'high',
+      confidence: 'high',
+      title: 'No GA4 tracking found, even though other tags are active',
+      observed: [
+        'No GA4 measurement ID or gtag/collect network requests found — checked both in page source and live network requests.',
+        'At least one other tracking layer (GTM, Meta Pixel, TikTok Pixel, or Google Ads) IS confirmed present.',
+      ],
+      proves: 'This store has some tracking installed, but Google Analytics 4 specifically is not one of them.',
+      doesNotProve: 'This doesn\'t mean GA4 was never set up — it could be configured inside a GTM container that never actually fires the GA4 tag (a misconfigured trigger), or removed intentionally in favor of another analytics tool.',
+      dependency: 'GA4 is the layer that reconciles ad-platform-reported conversions against actual Shopify revenue. Without it, Meta/TikTok/Google Ads ROAS numbers can\'t be independently checked against what the store actually sold.',
+      downstreamConsequences: [
+        'No way to compare ad-platform-reported conversions against real Shopify orders.',
+        'The financial audit (With Access tab) has no GA4 data source to reconcile against.',
+      ],
+      firstCheck: 'If a GTM container is present, open GTM Preview mode and check whether a GA4 Configuration tag exists and actually fires on page load.',
+      possibleReasons: [
+        { cause: 'Never set up.', howToCheck: 'Check Shopify Admin\'s Custom Pixels section and the GTM container (if any) for a saved GA4 property ID.' },
+        { cause: 'Configured inside GTM but the trigger is broken, so it never fires.', howToCheck: 'Open GTM Preview mode, load the page, and confirm a GA4 Configuration tag actually fires. If it\'s in the container but greyed out (not firing), the trigger is the fix.' },
+        { cause: 'Removed on purpose (e.g. relying on a third-party analytics app instead).', howToCheck: 'Check Shopify Admin\'s installed apps for an analytics replacement before treating this as a gap.' },
+      ],
+      requiresDeepScan: true,
+    });
+  }
+
+  if (hasDeep && !gtmConfirmed && (anyStaticTag || anyObservedRequest)) {
+    findings.push({
+      id: 'gtm-not-detected-with-partial-tracking',
+      severity: 'medium',
+      confidence: 'high',
+      title: 'No Google Tag Manager found, tags are installed directly instead',
+      observed: [
+        'No GTM container ID or gtm.js network requests found — checked both in page source and live network requests.',
+        'At least one tracking pixel (GA4, Meta, TikTok, or Google Ads) IS confirmed present without going through GTM.',
+      ],
+      proves: 'Tracking on this store is wired directly per-platform rather than centralized through a tag manager.',
+      doesNotProve: 'This alone doesn\'t prove anything is broken — direct installs can work fine. It does mean every future change (a new pixel, a consent-mode update, a server-side migration) needs a theme-code edit instead of a GTM Preview-tested change.',
+      dependency: 'A tag manager is what makes consent-mode gating, server-side tagging, and safe testing (Preview mode) possible without touching theme code. Without it, those upgrades are all harder and riskier.',
+      downstreamConsequences: [
+        'Every future tracking change risks a theme-code deploy instead of a reversible GTM Preview test.',
+        'No single place to audit which tags fire — they\'re scattered across theme files.',
+      ],
+      firstCheck: 'Decide whether consolidating the existing direct-install tags into a single GTM container is worth it before adding anything else.',
+      requiresDeepScan: true,
+    });
+  }
+
   // R3 — duplicate GTM containers. Static HTML only shows what's literally in
   // the initial source; a second container chain-loaded by the first (a very
   // common real-world pattern) only shows up in the deep-scan network
@@ -508,6 +568,13 @@ export function runDiagnostics(
     // strong enough evidence to reorder possibleReasons and soften the
     // language rather than leaving it as one generic bullet among three.
     const nativeScriptSeen = surface.hasNativeCmpScript;
+    // shouldShowBanner() is real, measured evidence (see server.cjs), but it's
+    // scoped to THIS scan's own visitor region, not a universal on/off — a
+    // `true` confidently resolves reason #1 below (banner configured, at
+    // least for this region); `false`/`null` leaves the existing hedge as-is,
+    // since a false here can't distinguish "not configured anywhere" from
+    // "configured for a different region than this scan's own."
+    const nativeBannerConfirmedShowing = nativeScriptSeen && deep?.nativeBannerShouldShow === true;
     findings.push({
       id: 'no-cmp-with-active-tags',
       severity: 'medium',
@@ -519,17 +586,33 @@ export function runDiagnostics(
           : 'At least one tracking signature (GTM/GA4/Meta/TikTok) found on page load.',
         'No known consent-tool signature (OneTrust, Cookiebot, CookieYes, etc.) matched in page HTML.',
         ...(nativeScriptSeen ? ['Shopify\'s own consent-tracking-api / Customer Privacy API script IS present on this page — its own native consent system may already be wired up, just not visible to this scan\'s third-party signature list.'] : []),
+        ...(nativeBannerConfirmedShowing ? ['Measured, not inferred: calling Shopify\'s own window.Shopify.customerPrivacy.shouldShowBanner() returned true, confirming the native banner is configured to show, at least for the region this scan\'s traffic was seen from.'] : []),
       ],
       proves: 'No third-party consent-management script from the known signature list was detected.',
-      doesNotProve: nativeScriptSeen
+      doesNotProve: nativeBannerConfirmedShowing
+        ? 'This does NOT confirm a compliance gap. Shopify\'s own API confirms the native banner is configured and would show to a visitor in this scan\'s region — it may show differently (or not at all) to visitors in other regions, Shopify\'s regional privacy rules are region-specific by design.'
+        : nativeScriptSeen
         ? 'This does NOT confirm a compliance gap. This store loads Shopify\'s own native consent-tracking script, a real, positive signal that the built-in banner may already be configured — that can only be confirmed in Shopify Admin, not from this scan alone.'
         : 'This does NOT confirm a compliance gap — Shopify\'s built-in consent banner (if enabled under Customer privacy settings) isn\'t on this signature list and wouldn\'t be detected here.',
       dependency: `${privacyRule} If tags are active before consent, the consent tool (or its absence) is what to fix, not the individual tags.`,
       downstreamConsequences: ['Possible regulatory exposure if tags genuinely fire before consent, depending on the store\'s target markets.'],
-      firstCheck: nativeScriptSeen
+      firstCheck: nativeBannerConfirmedShowing
+        ? 'Shopify\'s own API confirms the native banner is configured for this region. Check Shopify Admin\'s Customer Privacy settings to see which other regions it\'s enabled for, and confirm Consent Mode actually gates the tags above rather than just displaying the banner.'
+        : nativeScriptSeen
         ? 'This store shows a real signal of Shopify\'s native consent script — check Shopify Admin\'s Customer Privacy settings FIRST, before treating this as a gap.'
         : 'Check the Guide tab for each possible reason, in order. This scan can\'t tell which one it is on its own.',
-      possibleReasons: nativeScriptSeen
+      possibleReasons: nativeBannerConfirmedShowing
+        ? [
+            {
+              cause: 'Shopify\'s own built-in consent banner is confirmed configured for this region, measured directly, not inferred from script presence alone.',
+              howToCheck: 'Confirm in Shopify Admin\'s Customer Privacy settings which regions it covers, then confirm in GTM/Consent Mode that tags are actually gated on the visitor\'s choice, not just that a banner displays.',
+            },
+            {
+              cause: 'The banner shows for this region but a different region your traffic comes from (e.g. the US) may not be covered by Shopify\'s regional rules.',
+              howToCheck: 'Check Shopify Admin\'s Customer Privacy settings for the full list of regions covered, then confirm this matches where your actual customers are.',
+            },
+          ]
+        : nativeScriptSeen
         ? [
             {
               cause: 'Shopify\'s own built-in consent banner is enabled and likely already gating tracking, this scan detected its native script loading, just can\'t confirm the banner itself is switched on.',
@@ -609,11 +692,44 @@ export function runDiagnostics(
               cause: 'This is a dev/staging environment where consent gating is deliberately disabled for testing.',
               howToCheck: 'Confirm this store isn\'t the live production storefront before treating this as a real gap.',
             },
+            ...(hasDeep && deep!.trackingSignals.serverSideEndpointCandidates.length > 0
+              ? [{
+                  cause: 'This store also has server-side tracking confirmed (see the server-side finding above), fixing the client-side default alone doesn\'t guarantee it, the server container needs the consent signal forwarded to it too, not just the browser-side gtag call.',
+                  howToCheck: 'Check the sGTM/Stape container\'s own client configuration for whether it reads and respects an incoming consent signal (e.g. an x-gtm-consent header or event-level consent parameters) before forwarding to GA4/Meta/Ads.',
+                }]
+              : []),
           ],
           requiresDeepScan: true,
         });
       }
     }
+  }
+
+  // R6c — server-side tracking (sGTM/Stape/CAPI-style) confirmation. This
+  // evidence was already being captured (serverSideEndpointCandidates in
+  // server.cjs) but only ever surfaced as a small text line in the With
+  // Access tab, never as an actual Priority Finding — so a store that HAD
+  // real server-side infrastructure got no credit for it, and the two
+  // consent findings above never mentioned it as a relevant fix path either.
+  // Deliberately 'info' severity, not a problem being reported, a confirmed
+  // positive worth stating plainly rather than burying. Kept narrow: only
+  // fires on a genuine deep-scan-observed endpoint, never inferred.
+  if (hasDeep && deep!.trackingSignals.serverSideEndpointCandidates.length > 0) {
+    findings.push({
+      id: 'server-side-tracking-confirmed',
+      severity: 'info',
+      confidence: 'measured',
+      title: 'Server-side tracking endpoint confirmed',
+      observed: [
+        `Real network requests observed going to a server-side/first-party tracking endpoint: ${deep!.trackingSignals.serverSideEndpointCandidates.join(', ')}.`,
+      ],
+      proves: 'This store is routing at least some tracking through server-side infrastructure (e.g. Stape, a custom sGTM container, or Measurement Protocol), not relying on client-side tags alone.',
+      doesNotProve: 'This doesn\'t confirm every tag goes through this path, some tracking may still be purely client-side alongside it, and it doesn\'t confirm CAPI dedup (matching event_id between browser and server events) is set up correctly even where it exists.',
+      dependency: 'Server-side tracking is what survives ad blockers, Safari ITP, and iOS App Tracking Transparency, the fragility that affects most of the other findings here doesn\'t apply to whatever is actually routed through this path.',
+      downstreamConsequences: [],
+      firstCheck: 'Confirm in the sGTM/Stape container\'s own debug tool which specific tags are actually routed server-side versus still firing client-side.',
+      requiresDeepScan: true,
+    });
   }
 
   // R4i — a synthetic, non-sensitive query param was appended to the scanned

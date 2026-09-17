@@ -25,6 +25,7 @@ dist-ssr
 .env
 tokens.json
 leads.json
+HANDOFF.md
 
 # Local Claude Code tool-permission settings — machine-specific, not app code
 .claude/

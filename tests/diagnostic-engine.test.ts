@@ -81,7 +81,7 @@ test('"nothing detected" lists multiple possible causes to check, including the 
 });
 
 test('GTM/GA4 present but no dataLayer -> tags-without-datalayer beats a lower-severity finding', () => {
-  const surface = baseSurface({ gtmId: 'GTM-ABC1234', gtmIdsAll: ['GTM-ABC1234'] });
+  const surface = baseSurface({ gtmId: 'GTM-ABC1234', gtmIdsAll: ['GTM-ABC1234'], ga4Id: 'G-ABC1234' });
   const deep = baseDeep({ dataLayerPresent: false, dataLayer: null });
   const report = runDiagnostics(surface, deep);
   assert.ok(report.findings.some((f) => f.id === 'tags-without-datalayer'));
@@ -269,6 +269,30 @@ test('no-cmp-with-active-tags reorders possibleReasons and softens language when
   assert.match(finding.observed.join(' '), /consent-tracking-api/);
 });
 
+// window.Shopify.customerPrivacy.shouldShowBanner() is a real, documented
+// Shopify API — confirmed measured evidence should resolve the ambiguity
+// this finding otherwise has to hedge on.
+test('no-cmp-with-active-tags resolves the ambiguity with measured confidence when shouldShowBanner() returns true', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false, hasNativeCmpScript: true });
+  const deep = baseDeep({ nativeBannerShouldShow: true });
+  const report = runDiagnostics(surface, deep);
+  const finding = report.findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  assert.match(finding.observed.join(' '), /Measured, not inferred.*shouldShowBanner\(\) returned true/);
+  assert.match(finding.doesNotProve, /Shopify's own API confirms the native banner is configured/);
+  assert.match(finding.possibleReasons[0].cause, /confirmed configured for this region/);
+});
+
+test('no-cmp-with-active-tags keeps the hedged version when shouldShowBanner() returns false or is unavailable', () => {
+  const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false, hasNativeCmpScript: true });
+  const deepFalse = baseDeep({ nativeBannerShouldShow: false });
+  const findingFalse = runDiagnostics(surface, deepFalse).findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  assert.doesNotMatch(findingFalse.observed.join(' '), /Measured, not inferred/);
+
+  const deepNull = baseDeep({ nativeBannerShouldShow: null });
+  const findingNull = runDiagnostics(surface, deepNull).findings.find((f) => f.id === 'no-cmp-with-active-tags')!;
+  assert.doesNotMatch(findingNull.observed.join(' '), /Measured, not inferred/);
+});
+
 test('no-cmp-with-active-tags keeps the original generic possibleReasons order when no native script is detected', () => {
   const surface = baseSurface({ gtmId: 'GTM-REAL0001', gtmIdsAll: ['GTM-REAL0001'], hasCmp: false, hasNativeCmpScript: false });
   const report = runDiagnostics(surface, null);
@@ -285,4 +309,77 @@ test('tags-without-datalayer fires from deep-scan-observed activity alone, not j
   const finding = report.findings.find((f) => f.id === 'tags-without-datalayer');
   assert.ok(finding, 'expected the finding to fire — tags are confirmed firing via deep scan even with nothing in static HTML');
   assert.match(finding!.observed[0], /deep scan/i);
+});
+
+// Real gap found live (2026-09-05): dazzlingbeautysolution.com had Meta +
+// TikTok pixels confirmed but zero GTM and zero GA4 — no-measurement-layer
+// stayed silent (it only fires when EVERYTHING is absent) and the only
+// findings that showed were the two generic no-CMP ones, since those just
+// check "does any tag exist at all." Individually gauging GA4 and GTM closes
+// that blind spot.
+test('ga4-not-detected-with-partial-tracking fires when other platforms are confirmed but GA4 is confirmed absent', () => {
+  const surface = baseSurface({ hasMetaPixel: true, hasTiktokPixel: true });
+  const deep = baseDeep({ trackingSignals: { ...baseDeep().trackingSignals, metaBrowserRequests: 2, tiktokBrowserRequests: 1 } });
+  const report = runDiagnostics(surface, deep);
+  const finding = report.findings.find((f) => f.id === 'ga4-not-detected-with-partial-tracking');
+  assert.ok(finding, 'expected GA4 absence to be called out on its own, not buried under a generic no-CMP finding');
+  assert.equal(finding!.severity, 'high');
+  assert.equal(report.findings.some((f) => f.id === 'no-measurement-layer'), false, 'no-measurement-layer should not also fire — some tracking IS present');
+});
+
+test('gtm-not-detected-with-partial-tracking fires when tags are installed directly with no tag manager', () => {
+  const surface = baseSurface({ ga4Id: 'G-DIRECT0001' });
+  const deep = baseDeep();
+  const report = runDiagnostics(surface, deep);
+  const finding = report.findings.find((f) => f.id === 'gtm-not-detected-with-partial-tracking');
+  assert.ok(finding, 'expected GTM absence to be called out when a tag is confirmed installed without going through a tag manager');
+});
+
+test('neither GA4 nor GTM individual-gauge finding fires when nothing is present at all (no-measurement-layer covers that case instead)', () => {
+  const deep = baseDeep({ trackingSignals: { ga4Requests: 0, gtmRequests: 0, metaBrowserRequests: 0, tiktokBrowserRequests: 0, pinterestBrowserRequests: 0, snapchatBrowserRequests: 0, microsoftUetBrowserRequests: 0, serverSideEndpointCandidates: [] } });
+  const report = runDiagnostics(baseSurface(), deep);
+  assert.equal(report.findings.some((f) => f.id === 'ga4-not-detected-with-partial-tracking'), false);
+  assert.equal(report.findings.some((f) => f.id === 'gtm-not-detected-with-partial-tracking'), false);
+  assert.equal(report.earliestFailure?.id, 'no-measurement-layer');
+});
+
+test('neither individual-gauge finding fires without a deep scan, even if GA4/GTM are missing from static HTML', () => {
+  const surface = baseSurface({ hasMetaPixel: true });
+  const report = runDiagnostics(surface, null);
+  assert.equal(report.findings.some((f) => f.id === 'ga4-not-detected-with-partial-tracking'), false);
+  assert.equal(report.findings.some((f) => f.id === 'gtm-not-detected-with-partial-tracking'), false);
+});
+
+// Server-side detection was already being captured (serverSideEndpointCandidates)
+// but only ever displayed as a text line in the With Access tab, never surfaced
+// as an actual Priority Finding. Closing that gap.
+test('server-side-tracking-confirmed fires as an info-level positive when a server-side endpoint is observed', () => {
+  const deep = baseDeep({ trackingSignals: { ...baseDeep().trackingSignals, serverSideEndpointCandidates: ['gtm.mystore.com/g/collect'] } });
+  const report = runDiagnostics(baseSurface({ ga4Id: 'G-REAL0001' }), deep);
+  const finding = report.findings.find((f) => f.id === 'server-side-tracking-confirmed');
+  assert.ok(finding, 'expected a confirmed server-side finding when a real endpoint is observed');
+  assert.equal(finding!.severity, 'info');
+  assert.match(finding!.observed[0], /gtm\.mystore\.com/);
+});
+
+test('server-side-tracking-confirmed does not fire when no server-side endpoint is observed', () => {
+  const deep = baseDeep();
+  const report = runDiagnostics(baseSurface({ ga4Id: 'G-REAL0001' }), deep);
+  assert.equal(report.findings.some((f) => f.id === 'server-side-tracking-confirmed'), false);
+});
+
+test('consent-default-grants-before-interaction adds a server-side-specific possible reason when server-side tracking is also confirmed', () => {
+  const consentRaw = { 1: 'default', 2: { ad_storage: 'granted', analytics_storage: 'granted' } };
+  const deepWithServerSide = baseDeep({
+    consent: { found: true, raw: consentRaw },
+    trackingSignals: { ...baseDeep().trackingSignals, serverSideEndpointCandidates: ['gtm.mystore.com/g/collect'] },
+  });
+  const report = runDiagnostics(baseSurface(), deepWithServerSide);
+  const finding = report.findings.find((f) => f.id === 'consent-default-grants-before-interaction')!;
+  assert.ok(finding.possibleReasons!.some((r) => /server container needs the consent signal forwarded/.test(r.cause)));
+
+  const deepWithoutServerSide = baseDeep({ consent: { found: true, raw: consentRaw } });
+  const reportWithout = runDiagnostics(baseSurface(), deepWithoutServerSide);
+  const findingWithout = reportWithout.findings.find((f) => f.id === 'consent-default-grants-before-interaction')!;
+  assert.equal(findingWithout.possibleReasons!.some((r) => /server container needs the consent signal forwarded/.test(r.cause)), false);
 });

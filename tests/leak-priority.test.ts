@@ -67,7 +67,10 @@ test('null inputs (no CSV/live pull loaded) -> tracking-only audit runs fine, fi
     for (const metric of result.report.businessMetrics) {
       assert.match(metric.value, /Unaccessed/, `${metric.label} should stay honestly unaccessed with no order data`);
     }
-    assert.match(result.report.volumeNote!, /No order data loaded yet/);
+    // "No order data loaded yet" branch removed 2026-09-12 — cluttered
+    // every single Deep Scan (which never has order data), so the block
+    // now simply doesn't render until there's an actual leak to point at.
+    assert.equal(result.report.volumeNote, undefined);
     assert.equal(result.metrics.grossRevenue, 0);
     // Tracking diagnostics must still be real and unaffected by missing financial data.
     assert.equal(result.metrics.gtmId, 'GTM-TEST123');

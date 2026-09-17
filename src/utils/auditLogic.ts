@@ -85,6 +85,12 @@ export interface AuditDashboardResult {
   metrics: {
     gtmDetected: boolean;
     gtmId: string;
+    // Every distinct GTM-xxxxx actually found (static HTML + deep-scan
+    // network observation combined) — gtmId above only ever holds the
+    // first one, so a second/duplicate container was real evidence
+    // (see the 'duplicate-gtm-containers' finding) with nowhere to
+    // show itself in the At a Glance summary tile until this existed.
+    gtmIdsAll: string[];
     ga4Active: boolean;
     ga4Id: string;
     metaPixel: boolean;
@@ -909,8 +915,15 @@ export const runFullAudit = async (
   // computed for them. Now always surfaces the single biggest confirmed $
   // leak regardless of volume; the framing just adjusts for high volume.
   const topLeak = rankedLeaks[0];
+  // "No order data loaded yet" branch removed 2026-09-12 — cluttered the
+  // Deep Scan Overview, which never has order data at all, so this fired
+  // on every single Deep Scan with no exception, dead weight, not a
+  // pointer. The "Start Here" block now simply doesn't render (see
+  // App.tsx: `scanResult.report.volumeNote &&`) until order data actually
+  // exists to point at, matching the audit -> locate -> point sequence
+  // instead of announcing the absence of step 3 before step 1 is done.
   const volumeNote = !audit || !inputs
-    ? 'No order data loaded yet. This audit covers tracking evidence only. Load Shopify order data (CSV upload or live pull) to see financial leaks and business metrics.'
+    ? undefined
     : topLeak && topLeak.amt > 0
       ? inputs.totalOrders >= 500
         ? `High order volume (${inputs.totalOrders} orders), don't audit product-by-product. Start with "${topLeak.name}" (~${formatCurrency(topLeak.amt, region)}), the single largest leak, before anything else.`
@@ -1040,6 +1053,7 @@ export const runFullAudit = async (
     metrics: {
       gtmDetected: !!gtmId,
       gtmId: gtmId || 'Not found',
+      gtmIdsAll: effective.gtmIdsAll,
       ga4Active: !!ga4Id,
       ga4Id: ga4Id || 'Not found',
       metaPixel: effective.metaDetected,
@@ -1099,6 +1113,7 @@ function buildFailedResult(storeUrl: string, errorMessage: string): AuditDashboa
     metrics: {
       gtmDetected: false,
       gtmId: 'Scan failed',
+      gtmIdsAll: [],
       ga4Active: false,
       ga4Id: 'Scan failed',
       metaPixel: false,
@@ -1409,6 +1424,17 @@ export interface DeepScanResult {
   observedIds: { ga4: string[]; gtm: string[]; meta?: string[]; tiktok?: string[]; ads?: string[] };
   /** Optional — absent on cached evidence captured before this field existed. True/false is a direct measurement (see server.cjs); absent means "not tested," not "passed." */
   queryParamPreservedThroughLoad?: boolean;
+  /**
+   * Result of calling Shopify's own window.Shopify.customerPrivacy.shouldShowBanner()
+   * during the scan — real, documented Shopify API, not inferred. null means the
+   * API wasn't present (older theme, or absent entirely) or the check failed;
+   * true/false means it ran. Caveat: reflects whether THIS scan's own visitor
+   * region triggers Shopify's regional banner rules, not a universal "is the
+   * native banner enabled anywhere" answer — a false can mean either "not
+   * configured anywhere" or "configured correctly for a different region than
+   * wherever this scan's server IP geolocates to."
+   */
+  nativeBannerShouldShow?: boolean | null;
   /** True when the scan landed on Shopify's password splash instead of the real storefront — every other field is empty because of that, not because tracking is absent. */
   passwordProtected?: boolean;
   /** Present when passwordProtected is true — tells the operator what to do next, not a hard failure. */
