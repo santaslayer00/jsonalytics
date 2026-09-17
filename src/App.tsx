@@ -663,6 +663,19 @@ export default function App() {
         setScanError(result.report.summary);
       }
 
+      // The Deep Scan tab already auto-discovers these from real evidence —
+      // With Access's GTM/GA4 fields only exist as an optional cross-check
+      // (typed vs. observed), never a requirement (see gtmId fallback logic
+      // above and in resolveEffectiveSignals). Leaving them blank after a
+      // scan that already found real IDs made With Access look like it was
+      // demanding the same info a second time from scratch. Pre-fill from
+      // what was just found, only when the operator hasn't already typed
+      // something of their own in — never overwrite a real cross-check value.
+      if (result.status === 'ok') {
+        if (!gtmIdInput.trim() && result.metrics.gtmId !== 'Not found') setGtmIdInput(result.metrics.gtmId);
+        if (!ga4IdInput.trim() && result.metrics.ga4Id !== 'Not found') setGa4IdInput(result.metrics.ga4Id);
+      }
+
       // Both live-API reconciliation calls are the "with real access keys"
       // half — bifurcated from the deep-scan diagnostic above on purpose.
       // The diagnostic result is already set and complete by this point;
@@ -883,6 +896,7 @@ export default function App() {
     if (scanResult.metrics.hasPinterestTag) otherPlatforms.push(`Pinterest${scanResult.metrics.pinterestTagId ? ` (${scanResult.metrics.pinterestTagId})` : ''}`);
     if (scanResult.metrics.hasSnapchatPixel) otherPlatforms.push(`Snapchat${scanResult.metrics.snapchatPixelId ? ` (${scanResult.metrics.snapchatPixelId})` : ''}`);
     if (scanResult.metrics.hasMicrosoftUet) otherPlatforms.push('Microsoft UET');
+    const serverSideLive = scanResult.report.signalSources.stape === 'live';
     return (
       <div style={{ display: 'grid', gap: '1rem' }}>
       {deepScanSection === 'overview' && (
@@ -901,11 +915,38 @@ export default function App() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '6px' }}>
-            {signalTile('Google Tag Manager', scanResult.metrics.gtmDetected, scanResult.metrics.gtmId)}
+            {/* gtmId alone only ever holds the first container — a real second
+                one (a genuine, high-severity problem, not a detection miss;
+                see the 'duplicate-gtm-containers' finding below) had nowhere
+                to show itself here, making the summary look wrong on its own
+                even when the engine underneath already caught it. */}
+            {(() => {
+              // Defensive fallback: scanResult is stored as untyped state, so
+              // a result captured before gtmIdsAll existed (a stale scan
+              // still sitting in state across a reload) must not crash the
+              // whole page on a missing field — plain-old-JS undefined
+              // wasn't fixed by adding a type, only by never trusting it here.
+              const gtmIdsAll = scanResult.metrics.gtmIdsAll || [];
+              return signalTile(
+                'Google Tag Manager',
+                scanResult.metrics.gtmDetected && gtmIdsAll.length <= 1,
+                gtmIdsAll.length > 1
+                  ? `${gtmIdsAll.length} containers: ${gtmIdsAll.join(', ')}`
+                  : scanResult.metrics.gtmId
+              );
+            })()}
             {signalTile('GA4 Measurement ID', scanResult.metrics.ga4Active, scanResult.metrics.ga4Id)}
             {signalTile('Meta Pixel', scanResult.metrics.metaPixel, scanResult.metrics.metaPixel ? (scanResult.metrics.metaPixelId || 'Detected') : 'Not detected')}
             {signalTile('TikTok Pixel', scanResult.metrics.tiktokPixel, scanResult.metrics.tiktokPixel ? (scanResult.metrics.tiktokPixelId || 'Detected') : 'Not detected')}
             {signalTile('Consent Tool (CMP)', scanResult.metrics.cmpDetected, scanResult.metrics.cmpDetected ? scanResult.metrics.cmpName : 'Not detected')}
+            {/* Unlike the tiles above, absence here isn't a problem — most
+                stores never set up server-side tracking, it's an advanced/
+                optional layer, not a baseline requirement. Always renders
+                quiet (ok=true) so a "Not detected" store isn't wrongly
+                flagged the way a missing GTM/GA4/CMP would be; this tile
+                exists purely to stop burying a genuine positive when it IS
+                confirmed (see server-side-tracking-confirmed finding). */}
+            {signalTile('Server-side Tracking', true, serverSideLive ? 'Detected (sGTM/Stape)' : 'Not detected')}
           </div>
           {otherPlatforms.length > 0 && (
             <div style={{ marginTop: '8px', color: '#64748b', fontSize: '0.68rem' }}>Also detected: {otherPlatforms.join(', ')}</div>
@@ -1304,6 +1345,7 @@ export default function App() {
                           <option value="financial">Sounds like financial/COD/RTO</option>
                         </select>
                       </div>
+                      <div style={{ fontSize: '0.68rem', color: '#64748b' }}>Auto-fills from the last scan's discovered IDs once one's run — optional, only used to cross-check against what's actually observed firing.</div>
                       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                         <input
                           type="text"
